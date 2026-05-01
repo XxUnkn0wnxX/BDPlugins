@@ -8,4 +8,4 @@ Adds a dedicated button to Discord's channel header that takes you straight to t
 
 This is useful when you want to quickly jump to the start of a conversation without manually scrolling through long chat history.
 
-> Origin: `JumpToTop.plugin.js` was rebuilt from Huderon's JumpToTop release. That original release is now gone and cannot be found anywhere, so this repository keeps the rebuilt version available.
+> Origin: `JumpToTop.plugin.js` is a rebuilt version of [Huderon's BetterDiscordPlugins](https://github.com/Huderon/BetterDiscordPlugins), kept here because the old plugin was crashing my Discord client.
