@@ -1,15 +1,19 @@
 /**
  * @name JumpToTop
  * @author openAI
- * @version 1.0.0
+ * @version 1.0.1
  * @description Adds a channel header button that jumps to the first message in the current channel.
+ * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
+ * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/JumpToTop.plugin.js
  */
 
 "use strict";
 
 module.exports = class JumpToTop {
-    constructor() {
-        this.styleId = "jump-to-top-style";
+    constructor(meta) {
+        this.meta = meta ?? {};
+        this.pluginName = this.meta.name || "JumpToTop";
+        this.styleId = `${this.pluginName}-style`;
         this.buttonSelector = '[data-jump-to-top="true"]';
         this.buttonClass = "jump-to-top-button";
         this.label = "Jump to first message";
@@ -56,9 +60,7 @@ module.exports = class JumpToTop {
         this.renderQueued = false;
         this.lastRoute = "";
         this.removeButton();
-
-        const style = document.getElementById(this.styleId);
-        if (style) style.remove();
+        this.removeStyles();
     }
 
     onRouteChange() {
@@ -75,12 +77,8 @@ module.exports = class JumpToTop {
         });
     }
 
-    injectStyles() {
-        if (document.getElementById(this.styleId)) return;
-
-        const style = document.createElement("style");
-        style.id = this.styleId;
-        style.textContent = `
+    getStyleText() {
+        return `
             ${this.buttonSelector} {
                 color: var(--interactive-normal);
             }
@@ -95,8 +93,36 @@ module.exports = class JumpToTop {
                 border-radius: 4px;
             }
         `;
+    }
+
+    injectStyles() {
+        const css = this.getStyleText();
+        const bdDom = BdApi?.DOM;
+
+        if (bdDom?.addStyle && bdDom?.removeStyle) {
+            bdDom.removeStyle(this.styleId);
+            bdDom.addStyle(this.styleId, css);
+            return;
+        }
+
+        if (document.getElementById(this.styleId)) return;
+
+        const style = document.createElement("style");
+        style.id = this.styleId;
+        style.textContent = css;
 
         document.head.appendChild(style);
+    }
+
+    removeStyles() {
+        const bdDom = BdApi?.DOM;
+        if (bdDom?.removeStyle) {
+            bdDom.removeStyle(this.styleId);
+            return;
+        }
+
+        const style = document.getElementById(this.styleId);
+        if (style) style.remove();
     }
 
     ensureButton() {
