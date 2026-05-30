@@ -1,7 +1,7 @@
 /**
  * @name JumpToTop
  * @author openAI
- * @version 2.0
+ * @version 2.0.1
  * @description Adds a channel header button that jumps to the first message in the current channel.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/JumpToTop.plugin.js
@@ -13,6 +13,7 @@ module.exports = class JumpToTop {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || "JumpToTop";
+        this.version = this.meta.version || "2.0.1";
         this.styleId = `${this.pluginName}-style`;
         this.buttonSelector = '[data-jump-to-top="true"]';
         this.buttonClass = "jump-to-top-button";
@@ -27,6 +28,7 @@ module.exports = class JumpToTop {
 
     start() {
         try {
+            this.showChangelogIfNeeded();
             this.injectStyles();
             this.scheduleEnsureButton();
 
@@ -65,6 +67,39 @@ module.exports = class JumpToTop {
 
     onRouteChange() {
         this.scheduleEnsureButton();
+    }
+
+    getChangelog() {
+        return {
+            title: `${this.pluginName} has been updated!`,
+            subtitle: `v${this.version}`,
+            changes: [
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Stopped the button from appearing on non-message pages such as server boost pages.",
+                        "Limited the button to DMs, channels, threads, forums, and message permalink routes."
+                    ]
+                }
+            ]
+        };
+    }
+
+    showChangelogIfNeeded() {
+        try {
+            const data = BdApi?.Data;
+            const ui = BdApi?.UI;
+            if (!data?.load || !data?.save || !ui?.showChangelogModal) return;
+
+            if (data.load(this.pluginName, "version") === this.version) return;
+
+            ui.showChangelogModal(this.getChangelog());
+            data.save(this.pluginName, "version", this.version);
+        }
+        catch (error) {
+            console.error("[JumpToTop] Failed to show changelog.", error);
+        }
     }
 
     scheduleEnsureButton() {
@@ -163,7 +198,7 @@ module.exports = class JumpToTop {
     }
 
     getChannelRoute() {
-        const match = window.location.pathname.match(/^\/channels\/([^/]+)\/([^/]+)/);
+        const match = window.location.pathname.match(/^\/channels\/(@me|\d+)\/(\d+)(?:\/\d+)?\/?$/);
         if (!match) return null;
 
         return `/channels/${match[1]}/${match[2]}`;
