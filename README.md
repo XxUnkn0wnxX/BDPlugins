@@ -21,3 +21,11 @@ Adds a dedicated button to Discord's channel header that takes you straight to t
 This is useful when you want to quickly jump to the start of a conversation without manually scrolling through long chat history.
 
 > Origin: `JumpToTop.plugin.js` is a rebuilt version from [Huderon's BetterDiscordPlugins](https://github.com/Huderon/BetterDiscordPlugins), kept here because the old plugin was crashing my Discord client.
+
+## Experiments
+
+Enables Discord's experiment UI and developer-only experiment access from BetterDiscord.
+
+This plugin is built as a BetterDiscord-native runtime port modeled after [Equicord's Experiments plugin](https://github.com/Equicord/Equicord/blob/main/src/plugins/experiments/index.tsx). It forces local developer access, refreshes Discord's experiment stores, adds a warning card to the experiments page, and hides the bug report entry in the staff help popout.
+
+> Experiments are unreleased Discord features. They may break the client, and server-side features still cannot be enabled locally.
