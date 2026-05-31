@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.2.1
+ * @version 1.3.0
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -14,20 +14,27 @@ const PLUGIN_NAME = "Experiments";
 const DEV_FLAG = 1;
 const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
 const STAFF_HELP_POPOUT = "staff-help-popout";
+const EXPERIMENT_EMBED_MARKER = "Clear Treatment ";
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.2.1";
+        this.version = this.meta.version || "1.3.0";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
+        this.webpackRequire = null;
+        this.chunkArray = null;
+        this.originalChunkPush = null;
+        this.chunkPushWrapper = null;
+        this.originalWebpackFactories = new Map();
         this.originalFlags = new WeakMap();
         this.forcedMembers = [];
         this.userStore = null;
         this.dispatcher = null;
         this.observer = null;
         this.ensureTimer = null;
+        this.isRunning = false;
         this.ensureQueued = false;
         this.isEnsuring = false;
         this.staffHelpClickEvents = ["pointerdown", "mousedown", "click", "keydown"];
@@ -36,11 +43,13 @@ module.exports = class Experiments {
 
     start() {
         try {
+            this.isRunning = true;
             this.showChangelogIfNeeded();
             this.injectStyles();
             this.resolveInternals();
             this.patchUserStore();
             this.patchExperimentStores();
+            this.patchExperimentLinkEmbeds();
             this.startStaffHelpClickBlocker();
             this.ensureExperiments("start");
             this.startDomObserver();
@@ -54,6 +63,8 @@ module.exports = class Experiments {
     }
 
     stop() {
+        this.isRunning = false;
+
         if (this.observer) {
             this.observer.disconnect();
             this.observer = null;
@@ -65,12 +76,14 @@ module.exports = class Experiments {
         }
 
         this.stopStaffHelpClickBlocker();
+        this.restoreWebpackChunkPush();
 
         try {
             BdApi?.Patcher?.unpatchAll?.(this.pluginName);
         }
         catch {}
 
+        this.restoreWebpackFactories();
         this.restoreForcedMembers();
         this.restoreUserFlags();
         this.flushExperimentStores();
@@ -107,6 +120,13 @@ module.exports = class Experiments {
                     type: "added",
                     items: [
                         "Blocked staff-help popout trigger clicks when Discord exposes the toolbar developer menu."
+                    ]
+                },
+                {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Enabled experiment link embeds by patching Discord's experiment embed module when its exact source marker is present."
                     ]
                 },
                 {
@@ -219,6 +239,93 @@ module.exports = class Experiments {
             if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
             return original.apply(thisObject, args);
         });
+    }
+
+    patchExperimentLinkEmbeds() {
+        const webpackRequire = this.getWebpackRequire();
+        this.patchWebpackFactoryMap(webpackRequire?.m);
+        this.patchWebpackChunkPush();
+    }
+
+    patchWebpackChunkPush() {
+        const chunkArray = window.webpackChunkdiscord_app;
+        if (!Array.isArray(chunkArray) || typeof chunkArray.push !== "function") return;
+        if (this.chunkPushWrapper) return;
+
+        this.chunkArray = chunkArray;
+        this.originalChunkPush = chunkArray.push;
+        this.chunkPushWrapper = (...args) => {
+            if (this.isRunning) this.patchWebpackFactoryMap(args?.[0]?.[1]);
+            return this.originalChunkPush.apply(chunkArray, args);
+        };
+
+        chunkArray.push = this.chunkPushWrapper;
+    }
+
+    restoreWebpackChunkPush() {
+        if (this.chunkArray?.push === this.chunkPushWrapper) {
+            this.chunkArray.push = this.originalChunkPush;
+        }
+
+        this.chunkArray = null;
+        this.originalChunkPush = null;
+        this.chunkPushWrapper = null;
+    }
+
+    patchWebpackFactoryMap(moduleFactories) {
+        if (!moduleFactories || typeof moduleFactories !== "object") return;
+
+        for (const [moduleId, factory] of Object.entries(moduleFactories)) {
+            if (typeof factory !== "function") continue;
+            if (this.originalWebpackFactories.has(moduleId)) continue;
+
+            const source = Function.prototype.toString.call(factory);
+            if (!source.includes(EXPERIMENT_EMBED_MARKER)) continue;
+
+            const patchedSource = this.patchExperimentEmbedSource(source);
+            if (!patchedSource || patchedSource === source) continue;
+
+            const patchedFactory = this.createWebpackFactory(patchedSource, moduleId);
+            if (!patchedFactory) continue;
+
+            this.originalWebpackFactories.set(moduleId, factory);
+            moduleFactories[moduleId] = patchedFactory;
+        }
+    }
+
+    patchExperimentEmbedSource(source) {
+        let patchedSource = source.replace(/[$_\w]+\?\.isStaff\(\)/, "true");
+
+        patchedSource = patchedSource.replace(
+            /\.isStaffPersonal\(\).+?if\(null==([A-Za-z_$][\w$]*)\|\|null==[A-Za-z_$][\w$]*(?=\)return null;)/,
+            (match, experimentKey) => `${match}||({})[${experimentKey}]!=null`
+        );
+
+        return patchedSource;
+    }
+
+    createWebpackFactory(source, moduleId) {
+        try {
+            return (0, eval)(`(${source})`);
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to patch experiment embed module ${moduleId}.`, error);
+            return null;
+        }
+    }
+
+    restoreWebpackFactories() {
+        const moduleFactories = this.webpackRequire?.m;
+        if (!moduleFactories) {
+            this.originalWebpackFactories.clear();
+            return;
+        }
+
+        for (const [moduleId, factory] of this.originalWebpackFactories) {
+            moduleFactories[moduleId] = factory;
+        }
+
+        this.originalWebpackFactories.clear();
     }
 
     startStaffHelpClickBlocker() {
@@ -450,6 +557,25 @@ module.exports = class Experiments {
         catch {}
 
         return null;
+    }
+
+    getWebpackRequire() {
+        if (this.webpackRequire) return this.webpackRequire;
+
+        try {
+            const chunkArray = window.webpackChunkdiscord_app;
+            if (!Array.isArray(chunkArray)) return null;
+
+            chunkArray.push([[`${this.pluginName}-webpack-${Date.now()}`], {}, webpackRequire => {
+                this.webpackRequire = webpackRequire;
+            }]);
+            chunkArray.pop();
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to resolve Webpack require.`, error);
+        }
+
+        return this.webpackRequire;
     }
 
     startDomObserver() {
