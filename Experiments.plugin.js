@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.2.0
+ * @version 1.2.1
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -13,12 +13,13 @@
 const PLUGIN_NAME = "Experiments";
 const DEV_FLAG = 1;
 const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
+const STAFF_HELP_POPOUT = "staff-help-popout";
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.2.0";
+        this.version = this.meta.version || "1.2.1";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.originalFlags = new WeakMap();
@@ -29,6 +30,8 @@ module.exports = class Experiments {
         this.ensureTimer = null;
         this.ensureQueued = false;
         this.isEnsuring = false;
+        this.staffHelpClickEvents = ["pointerdown", "mousedown", "click", "keydown"];
+        this.staffHelpClickHandler = event => this.handleStaffHelpInteraction(event);
     }
 
     start() {
@@ -38,6 +41,7 @@ module.exports = class Experiments {
             this.resolveInternals();
             this.patchUserStore();
             this.patchExperimentStores();
+            this.startStaffHelpClickBlocker();
             this.ensureExperiments("start");
             this.startDomObserver();
             this.queueEnsureWarningCard();
@@ -59,6 +63,8 @@ module.exports = class Experiments {
             window.clearInterval(this.ensureTimer);
             this.ensureTimer = null;
         }
+
+        this.stopStaffHelpClickBlocker();
 
         try {
             BdApi?.Patcher?.unpatchAll?.(this.pluginName);
@@ -94,6 +100,13 @@ module.exports = class Experiments {
                     type: "added",
                     items: [
                         "Added a scoped bug-reporter experiment bucket patch to expose Discord's own toolbar developer/bug-report menu path without scanning Webpack modules."
+                    ]
+                },
+                {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Blocked staff-help popout trigger clicks when Discord exposes the toolbar developer menu."
                     ]
                 },
                 {
@@ -206,6 +219,48 @@ module.exports = class Experiments {
             if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
             return original.apply(thisObject, args);
         });
+    }
+
+    startStaffHelpClickBlocker() {
+        for (const eventName of this.staffHelpClickEvents) {
+            document.addEventListener(eventName, this.staffHelpClickHandler, true);
+        }
+    }
+
+    stopStaffHelpClickBlocker() {
+        for (const eventName of this.staffHelpClickEvents) {
+            document.removeEventListener(eventName, this.staffHelpClickHandler, true);
+        }
+    }
+
+    handleStaffHelpInteraction(event) {
+        if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
+        if (!this.findStaffHelpTrigger(event.target)) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }
+
+    findStaffHelpTrigger(target) {
+        if (!(target instanceof Element)) return null;
+
+        const taggedNode = target.closest([
+            `[id*='${STAFF_HELP_POPOUT}']`,
+            `[aria-controls*='${STAFF_HELP_POPOUT}']`,
+            `[aria-owns*='${STAFF_HELP_POPOUT}']`,
+            `[data-popout-id*='${STAFF_HELP_POPOUT}']`,
+            `[data-nav-id*='${STAFF_HELP_POPOUT}']`
+        ].join(","));
+
+        const interactive = (taggedNode || target).closest("button,[role='button'],[aria-haspopup]");
+        if (!interactive) return null;
+
+        for (const attribute of interactive.attributes) {
+            if (String(attribute.value).includes(STAFF_HELP_POPOUT)) return interactive;
+        }
+
+        return taggedNode ? interactive : null;
     }
 
     ensureExperiments(reason) {
