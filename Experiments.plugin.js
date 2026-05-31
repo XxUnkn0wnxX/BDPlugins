@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.0.2
+ * @version 1.2.0
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -12,12 +12,13 @@
 
 const PLUGIN_NAME = "Experiments";
 const DEV_FLAG = 1;
+const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.2";
+        this.version = this.meta.version || "1.2.0";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.originalFlags = new WeakMap();
@@ -89,6 +90,13 @@ module.exports = class Experiments {
                     ]
                 },
                 {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Added a scoped bug-reporter experiment bucket patch to expose Discord's own toolbar developer/bug-report menu path without scanning Webpack modules."
+                    ]
+                },
+                {
                     title: "Fixed",
                     type: "fixed",
                     items: [
@@ -100,6 +108,13 @@ module.exports = class Experiments {
                     type: "fixed",
                     items: [
                         "Stopped sending a synthetic OVERLAY_INITIALIZE payload to Discord's ExperimentStore; current Discord builds expect experiment-load state there."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Removed the Stage 1 Webpack discovery scanner so this plugin does not touch shared lookup paths or conflict with other plugins."
                     ]
                 },
                 {
@@ -167,6 +182,8 @@ module.exports = class Experiments {
             const handler = node.actionHandler;
             if (!handler) continue;
 
+            if (node.name === "ExperimentStore") this.patchBugReporterExperiment(node);
+
             for (const action of ["CONNECTION_OPEN"]) {
                 if (typeof handler[action] !== "function" || !BdApi?.Patcher?.instead) continue;
 
@@ -180,6 +197,15 @@ module.exports = class Experiments {
         }
 
         this.ensureTimer = window.setInterval(() => this.ensureExperiments("interval"), 10000);
+    }
+
+    patchBugReporterExperiment(experimentStore) {
+        if (!experimentStore?.getUserExperimentBucket || !BdApi?.Patcher?.instead) return;
+
+        BdApi.Patcher.instead(this.pluginName, experimentStore, "getUserExperimentBucket", (thisObject, args, original) => {
+            if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
+            return original.apply(thisObject, args);
+        });
     }
 
     ensureExperiments(reason) {
