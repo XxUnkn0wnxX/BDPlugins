@@ -1230,7 +1230,11 @@ module.exports = class Experiments {
             return;
         }
 
-        if (document.getElementById(this.warningId)) return;
+        const existingCard = document.getElementById(this.warningId);
+        if (existingCard) {
+            this.updateWarningCardScrollSpacing(existingCard);
+            return;
+        }
 
         const container = this.findWarningContainer(searchInput);
         if (!container) return;
@@ -1247,6 +1251,7 @@ module.exports = class Experiments {
         `;
 
         container.insertBefore(card, container.firstElementChild);
+        this.updateWarningCardScrollSpacing(card);
     }
 
     findWarningContainer(searchInput) {
@@ -1263,6 +1268,42 @@ module.exports = class Experiments {
 
     removeWarningCard() {
         document.getElementById(this.warningId)?.remove();
+        for (const host of document.querySelectorAll(".bd-experiments-warning-scroll-host")) {
+            host.classList.remove("bd-experiments-warning-scroll-host");
+            host.style.removeProperty("--bd-experiments-warning-scroll-offset");
+        }
+    }
+
+    updateWarningCardScrollSpacing(card) {
+        const host = this.findScrollableAncestor(card);
+        if (!host) return;
+
+        window.requestAnimationFrame(() => {
+            const height = Math.ceil(card.getBoundingClientRect().height || 0);
+            if (!height) return;
+
+            for (const previousHost of document.querySelectorAll(".bd-experiments-warning-scroll-host")) {
+                if (previousHost === host) continue;
+                previousHost.classList.remove("bd-experiments-warning-scroll-host");
+                previousHost.style.removeProperty("--bd-experiments-warning-scroll-offset");
+            }
+
+            host.classList.add("bd-experiments-warning-scroll-host");
+            host.style.setProperty("--bd-experiments-warning-scroll-offset", `${height + 16}px`);
+        });
+    }
+
+    findScrollableAncestor(node) {
+        let current = node?.parentElement;
+
+        while (current && current !== document.body) {
+            const style = window.getComputedStyle(current);
+            const canScroll = /(auto|scroll)/.test(style.overflowY) || current.scrollHeight > current.clientHeight;
+            if (canScroll) return current;
+            current = current.parentElement;
+        }
+
+        return null;
     }
 
     injectStyles() {
@@ -1287,6 +1328,11 @@ module.exports = class Experiments {
                 gap: 8px;
                 margin-bottom: 16px;
                 padding: 12px 14px;
+            }
+
+            .bd-experiments-warning-scroll-host {
+                box-sizing: border-box;
+                padding-bottom: var(--bd-experiments-warning-scroll-offset, 0px) !important;
             }
 
             .bd-experiments-warning-title {
