@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.4.0
+ * @version 1.5.0
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -18,18 +18,23 @@ const SERVER_ASSIGNMENT_MARKER = "}getServerAssignment(";
 const EXPERIMENT_EMBED_MARKER = "Clear Treatment ";
 const EXPERIMENT_URL_HELPER_MARKER = '"^dev://experiment/';
 const EXPERIMENT_DEV_LINK_PREFIX = "dev://experiment/";
+const PLAYGROUND_DEV_LINK_PREFIX = "dev://playground/";
+const PLAYGROUND_EMBED_MARKER = "useComponentPlaygroundConfigs";
 const EXPERIMENT_URL_FALLBACK = /^dev:\/\/experiment\/([^/\s]+)(?:\/([^/\s]+))?$/i;
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.4.0";
+        this.version = this.meta.version || "1.5.0";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.serverAssignmentTargets = new WeakSet();
         this.bugReporterStores = new WeakSet();
         this.experimentUrlHelperModules = new WeakSet();
+        this.playgroundEmbedModules = new WeakSet();
+        this.playgroundLazyTypes = new WeakSet();
+        this.staffWrappedComponentTypes = new WeakMap();
         this.devLinkRuleFactories = new WeakSet();
         this.devLinkRuleTargets = new WeakSet();
         this.lazyGuardAbortController = null;
@@ -133,6 +138,13 @@ module.exports = class Experiments {
                     type: "added",
                     items: [
                         "Added BetterDiscord-owned experiment URL helper patches for negative treatment IDs and treatment-label links."
+                    ]
+                },
+                {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Added scoped staff-gate wrappers for experiment and playground dev-link embeds without globally forcing Discord staff methods."
                     ]
                 },
                 {
@@ -303,6 +315,8 @@ module.exports = class Experiments {
 
     patchExperimentGuards() {
         this.patchExperimentUrlHelpers();
+        this.patchLoadedPlaygroundEmbedComponents();
+        this.watchLazyPlaygroundEmbedComponents();
         this.patchExperimentDevLinkRuntimeGuards();
         this.patchServerAssignmentRuntime();
     }
@@ -418,6 +432,15 @@ module.exports = class Experiments {
         return String(value ?? "").replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
     }
 
+    functionSource(value) {
+        try {
+            return Function.prototype.toString.call(value);
+        }
+        catch {
+            return "";
+        }
+    }
+
     patchExperimentDevLinkRuntimeGuards() {
         const webpack = BdApi?.Webpack;
         if (!webpack?.getAllBySource || !BdApi?.Patcher?.after) return;
@@ -459,10 +482,13 @@ module.exports = class Experiments {
 
         BdApi.Patcher.instead(this.pluginName, devLink, "react", (thisObject, args, original) => {
             const url = this.getDevLinkUrl(args?.[0]);
-            if (!this.isExperimentDevLink(url)) return original.apply(thisObject, args);
+            if (!this.isGuardedDevLink(url)) return original.apply(thisObject, args);
+            if (this.isPlaygroundDevLink(url)) this.patchLoadedPlaygroundEmbedComponents();
 
             try {
-                return this.wrapDevLinkElement(original.apply(thisObject, args), url);
+                const element = original.apply(thisObject, args);
+                if (this.isPlaygroundDevLink(url)) this.patchPlaygroundLazyTypes(element);
+                return this.wrapDevLinkElement(element, url);
             }
             catch (error) {
                 console.error(`[${this.pluginName}] Blocked experiment dev-link render crash.`, error);
@@ -479,6 +505,14 @@ module.exports = class Experiments {
         return url.startsWith(EXPERIMENT_DEV_LINK_PREFIX);
     }
 
+    isPlaygroundDevLink(url) {
+        return url.startsWith(PLAYGROUND_DEV_LINK_PREFIX);
+    }
+
+    isGuardedDevLink(url) {
+        return this.isExperimentDevLink(url) || this.isPlaygroundDevLink(url);
+    }
+
     wrapDevLinkElement(element, url) {
         const React = BdApi?.React;
         const Boundary = this.getDevLinkErrorBoundary();
@@ -486,7 +520,179 @@ module.exports = class Experiments {
 
         return React.createElement(Boundary, {
             fallback: this.createDevLinkFallback(url)
-        }, element);
+        }, this.wrapStaffGatedElement(element));
+    }
+
+    wrapStaffGatedElement(element) {
+        const React = BdApi?.React;
+        if (!React?.isValidElement?.(element)) return element;
+
+        const children = element.props?.children;
+        const wrappedChildren = Array.isArray(children)
+            ? children.map(child => this.wrapStaffGatedElement(child))
+            : this.wrapStaffGatedElement(children);
+        const hasWrappedChildren = wrappedChildren !== children;
+        const wrappedType = typeof element.type === "function" ? this.getStaffWrappedComponentType(element.type) : element.type;
+
+        if (wrappedType === element.type && !hasWrappedChildren) return element;
+
+        return React.createElement(wrappedType, {
+            ...element.props,
+            key: element.key,
+            ref: element.ref
+        }, wrappedChildren);
+    }
+
+    getStaffWrappedComponentType(type) {
+        if (this.staffWrappedComponentTypes.has(type)) return this.staffWrappedComponentTypes.get(type);
+
+        const plugin = this;
+        const WrappedComponent = function ExperimentsStaffGatedEmbed(props) {
+            return plugin.withTemporaryStaffUser(() => type(props));
+        };
+
+        WrappedComponent.displayName = `ExperimentsStaffGated(${type.displayName || type.name || "Component"})`;
+        this.staffWrappedComponentTypes.set(type, WrappedComponent);
+        return WrappedComponent;
+    }
+
+    withTemporaryStaffUser(callback) {
+        const user = this.userStore?.getCurrentUser?.();
+        const restore = [];
+
+        this.forceTemporaryBooleanMethod(user, "isStaff", restore);
+        this.forceTemporaryBooleanMethod(user, "isStaffPersonal", restore);
+
+        try {
+            return callback();
+        }
+        finally {
+            for (const restoreMethod of restore.reverse()) restoreMethod();
+        }
+    }
+
+    forceTemporaryBooleanMethod(target, property, restore) {
+        if (!target || typeof target !== "object") return;
+
+        try {
+            if (typeof target[property] === "function" && target[property]() === true) return;
+        }
+        catch {}
+
+        const descriptor = Object.getOwnPropertyDescriptor(target, property);
+        if (descriptor && !descriptor.configurable) return;
+
+        try {
+            Object.defineProperty(target, property, {
+                configurable: true,
+                value: () => true
+            });
+
+            restore.push(() => {
+                try {
+                    if (descriptor) Object.defineProperty(target, property, descriptor);
+                    else delete target[property];
+                }
+                catch {}
+            });
+        }
+        catch {}
+    }
+
+    patchLoadedPlaygroundEmbedComponents() {
+        const webpack = BdApi?.Webpack;
+        if (!webpack?.getAllBySource) return;
+
+        try {
+            const modules = webpack.getAllBySource(PLAYGROUND_EMBED_MARKER, {
+                raw: true,
+                fatal: false
+            });
+
+            for (const module of modules || []) {
+                this.patchPlaygroundEmbedModule(module?.exports);
+            }
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to patch loaded playground embed components.`, error);
+        }
+    }
+
+    watchLazyPlaygroundEmbedComponents() {
+        const webpack = BdApi?.Webpack;
+        const bySource = webpack?.Filters?.bySource;
+        if (!webpack?.waitForModule || !bySource) return;
+
+        try {
+            webpack.waitForModule(bySource(PLAYGROUND_EMBED_MARKER), {
+                raw: true,
+                fatal: false,
+                signal: this.getLazyGuardSignal()
+            }).then(module => this.patchPlaygroundEmbedModule(module?.exports)).catch(error => {
+                if (error?.name !== "AbortError") {
+                    console.error(`[${this.pluginName}] Failed while waiting for playground embed component.`, error);
+                }
+            });
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to watch playground embed component.`, error);
+        }
+    }
+
+    patchPlaygroundEmbedModule(exports) {
+        if (!exports || typeof exports !== "object") return;
+        if (this.playgroundEmbedModules.has(exports)) return;
+        if (!BdApi?.Patcher?.instead) return;
+
+        const targetKey = ["PlaygroundEmbed", "default"].find(key => {
+            return typeof exports[key] === "function"
+                && this.functionSource(exports[key]).includes(PLAYGROUND_EMBED_MARKER);
+        });
+        if (!targetKey) return;
+
+        this.playgroundEmbedModules.add(exports);
+
+        BdApi.Patcher.instead(this.pluginName, exports, targetKey, (thisObject, args, original) => {
+            return this.withTemporaryStaffUser(() => original.apply(thisObject, args));
+        });
+    }
+
+    patchPlaygroundLazyTypes(element) {
+        if (!element || typeof element !== "object") return;
+
+        const type = element.type;
+        if (type && typeof type === "object") this.patchPlaygroundLazyType(type);
+
+        const children = element.props?.children;
+        if (Array.isArray(children)) {
+            for (const child of children) this.patchPlaygroundLazyTypes(child);
+        }
+        else this.patchPlaygroundLazyTypes(children);
+    }
+
+    patchPlaygroundLazyType(lazyType) {
+        const payload = lazyType?._payload;
+        if (!payload || typeof payload._result !== "function") return;
+        if (this.playgroundLazyTypes.has(lazyType)) return;
+        if (!this.functionSource(payload._result).includes("PlaygroundEmbed")) return;
+
+        this.playgroundLazyTypes.add(lazyType);
+
+        const originalResult = payload._result;
+        payload._result = (...args) => {
+            const result = originalResult.apply(payload, args);
+            if (!result?.then) return this.wrapResolvedPlaygroundModule(result);
+            return result.then(module => this.wrapResolvedPlaygroundModule(module));
+        };
+    }
+
+    wrapResolvedPlaygroundModule(module) {
+        if (!module || typeof module !== "object") return module;
+        if (typeof module.default !== "function") return module;
+        return {
+            ...module,
+            default: this.getStaffWrappedComponentType(module.default)
+        };
     }
 
     createDevLinkFallback(url) {
@@ -576,9 +782,7 @@ module.exports = class Experiments {
 
     watchLazyServerAssignmentTargets() {
         const webpack = BdApi?.Webpack;
-        if (!webpack?.waitForModule || this.lazyGuardAbortController) return;
-
-        this.lazyGuardAbortController = new AbortController();
+        if (!webpack?.waitForModule) return;
 
         this.watchLazyServerAssignmentModulesBySource(webpack);
         this.watchLazyServerAssignmentTargetsByShape(webpack);
@@ -592,7 +796,7 @@ module.exports = class Experiments {
             webpack.waitForModule(bySource(SERVER_ASSIGNMENT_MARKER), {
                 raw: true,
                 fatal: false,
-                signal: this.lazyGuardAbortController.signal
+                signal: this.getLazyGuardSignal()
             }).then(module => this.patchServerAssignmentRawModule(module)).catch(error => {
                 if (error?.name !== "AbortError") {
                     console.error(`[${this.pluginName}] Failed while waiting for source-matched getServerAssignment module.`, error);
@@ -610,7 +814,7 @@ module.exports = class Experiments {
                 searchExports: true,
                 defaultExport: false,
                 fatal: false,
-                signal: this.lazyGuardAbortController.signal
+                signal: this.getLazyGuardSignal()
             }).then(target => this.patchServerAssignmentTarget(target)).catch(error => {
                 if (error?.name !== "AbortError") {
                     console.error(`[${this.pluginName}] Failed while waiting for getServerAssignment target.`, error);
@@ -665,6 +869,11 @@ module.exports = class Experiments {
             if (args?.[0] == null) return undefined;
             return original.apply(thisObject, args);
         });
+    }
+
+    getLazyGuardSignal() {
+        if (!this.lazyGuardAbortController) this.lazyGuardAbortController = new AbortController();
+        return this.lazyGuardAbortController.signal;
     }
 
     startStaffHelpClickBlocker() {
