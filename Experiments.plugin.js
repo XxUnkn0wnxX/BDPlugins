@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.3.3
+ * @version 1.3.4
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -22,10 +22,11 @@ module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.3.3";
+        this.version = this.meta.version || "1.3.4";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.serverAssignmentTargets = new WeakSet();
+        this.bugReporterStores = new WeakSet();
         this.devLinkRuleFactories = new WeakSet();
         this.devLinkRuleTargets = new WeakSet();
         this.lazyGuardAbortController = null;
@@ -115,6 +116,13 @@ module.exports = class Experiments {
                     type: "added",
                     items: [
                         "Added a scoped bug-reporter experiment bucket patch to expose Discord's own toolbar developer/bug-report menu path without scanning Webpack modules."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Patched the public ExperimentStore object as well as the dispatcher node so the toolbar developer menu bucket is forced on current Discord builds."
                     ]
                 },
                 {
@@ -239,6 +247,7 @@ module.exports = class Experiments {
 
     patchExperimentStores() {
         const nodes = this.getDispatcherNodes();
+        this.patchBugReporterExperiment(this.getStore("ExperimentStore"));
 
         for (const node of nodes) {
             if (!node || !["ExperimentStore", "DeveloperExperimentStore"].includes(node.name)) continue;
@@ -271,6 +280,9 @@ module.exports = class Experiments {
 
     patchBugReporterExperiment(experimentStore) {
         if (!experimentStore?.getUserExperimentBucket || !BdApi?.Patcher?.instead) return;
+        if (this.bugReporterStores.has(experimentStore)) return;
+
+        this.bugReporterStores.add(experimentStore);
 
         BdApi.Patcher.instead(this.pluginName, experimentStore, "getUserExperimentBucket", (thisObject, args, original) => {
             if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
