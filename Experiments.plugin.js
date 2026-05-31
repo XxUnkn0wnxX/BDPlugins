@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.3.4
+ * @version 1.4.0
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -16,17 +16,20 @@ const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
 const STAFF_HELP_POPOUT = "staff-help-popout";
 const SERVER_ASSIGNMENT_MARKER = "}getServerAssignment(";
 const EXPERIMENT_EMBED_MARKER = "Clear Treatment ";
+const EXPERIMENT_URL_HELPER_MARKER = '"^dev://experiment/';
 const EXPERIMENT_DEV_LINK_PREFIX = "dev://experiment/";
+const EXPERIMENT_URL_FALLBACK = /^dev:\/\/experiment\/([^/\s]+)(?:\/([^/\s]+))?$/i;
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.3.4";
+        this.version = this.meta.version || "1.4.0";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.serverAssignmentTargets = new WeakSet();
         this.bugReporterStores = new WeakSet();
+        this.experimentUrlHelperModules = new WeakSet();
         this.devLinkRuleFactories = new WeakSet();
         this.devLinkRuleTargets = new WeakSet();
         this.lazyGuardAbortController = null;
@@ -123,6 +126,13 @@ module.exports = class Experiments {
                     type: "fixed",
                     items: [
                         "Patched the public ExperimentStore object as well as the dispatcher node so the toolbar developer menu bucket is forced on current Discord builds."
+                    ]
+                },
+                {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Added BetterDiscord-owned experiment URL helper patches for negative treatment IDs and treatment-label links."
                     ]
                 },
                 {
@@ -285,14 +295,127 @@ module.exports = class Experiments {
         this.bugReporterStores.add(experimentStore);
 
         BdApi.Patcher.instead(this.pluginName, experimentStore, "getUserExperimentBucket", (thisObject, args, original) => {
+            if (!args?.length || typeof args[0] !== "string") return null;
             if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
             return original.apply(thisObject, args);
         });
     }
 
     patchExperimentGuards() {
+        this.patchExperimentUrlHelpers();
         this.patchExperimentDevLinkRuntimeGuards();
         this.patchServerAssignmentRuntime();
+    }
+
+    patchExperimentUrlHelpers() {
+        const webpack = BdApi?.Webpack;
+        if (!webpack?.getAllBySource) return;
+
+        try {
+            const modules = webpack.getAllBySource(EXPERIMENT_URL_HELPER_MARKER, {
+                raw: true,
+                fatal: false
+            });
+
+            for (const module of modules || []) {
+                this.patchExperimentUrlHelperModule(module?.exports);
+            }
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to patch experiment URL helpers.`, error);
+        }
+    }
+
+    patchExperimentUrlHelperModule(exports) {
+        if (!exports || typeof exports !== "object") return;
+        if (this.experimentUrlHelperModules.has(exports)) return;
+        if (!BdApi?.Patcher?.instead) return;
+
+        const hasHelperShape = typeof exports.W0 === "function"
+            && typeof exports.OL === "function"
+            && typeof exports.Kb === "function";
+        if (!hasHelperShape) return;
+
+        this.experimentUrlHelperModules.add(exports);
+
+        BdApi.Patcher.instead(this.pluginName, exports, "W0", (thisObject, args, original) => {
+            const originalResult = original.apply(thisObject, args);
+            if (originalResult) return originalResult;
+
+            return this.getExperimentUrlMatch(args?.[0]) !== null;
+        });
+
+        BdApi.Patcher.instead(this.pluginName, exports, "OL", (thisObject, args, original) => {
+            const originalResult = original.apply(thisObject, args);
+            if (originalResult != null) return originalResult;
+
+            return this.getExperimentUrlId(args?.[0]);
+        });
+
+        BdApi.Patcher.instead(this.pluginName, exports, "Kb", (thisObject, args, original) => {
+            const originalResult = original.apply(thisObject, args);
+            if (Number.isFinite(originalResult)) return originalResult;
+
+            const treatment = this.getExperimentUrlTreatment(args?.[0]);
+            if (treatment == null) return null;
+
+            if (/^-?\d+$/.test(treatment)) return Number(treatment);
+
+            const experimentId = this.getExperimentUrlId(args?.[0]);
+            const matchedTreatment = this.findExperimentTreatmentByLabel(exports, experimentId, treatment);
+            return matchedTreatment ?? null;
+        });
+    }
+
+    getExperimentUrlMatch(url) {
+        if (typeof url !== "string") return null;
+        return EXPERIMENT_URL_FALLBACK.exec(url);
+    }
+
+    getExperimentUrlId(url) {
+        return this.getExperimentUrlMatch(url)?.[1] ?? null;
+    }
+
+    getExperimentUrlTreatment(url) {
+        const treatment = this.getExperimentUrlMatch(url)?.[2];
+        if (treatment == null) return null;
+        return this.safeDecodeURIComponent(treatment);
+    }
+
+    safeDecodeURIComponent(value) {
+        try {
+            return decodeURIComponent(String(value));
+        }
+        catch {
+            return String(value);
+        }
+    }
+
+    findExperimentTreatmentByLabel(helpers, experimentId, treatment) {
+        if (!experimentId || typeof helpers?.hp !== "function") return null;
+
+        let options = [];
+        try {
+            options = helpers.hp(experimentId) || [];
+        }
+        catch {
+            return null;
+        }
+
+        const target = this.cleanExperimentLabel(treatment);
+        if (!target) return null;
+
+        const match = options.find(option => {
+            return this.cleanExperimentLabel(option?.label) === target
+                || this.cleanExperimentLabel(option?.value) === target
+                || this.cleanExperimentLabel(option?.id) === target;
+        });
+
+        return match ? match.value ?? match.id ?? null : null;
+    }
+
+    cleanExperimentLabel(value) {
+        return String(value ?? "").replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
     }
 
     patchExperimentDevLinkRuntimeGuards() {
