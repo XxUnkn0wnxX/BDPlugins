@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.3.2
+ * @version 1.3.3
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -14,16 +14,22 @@ const PLUGIN_NAME = "Experiments";
 const DEV_FLAG = 1;
 const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
 const STAFF_HELP_POPOUT = "staff-help-popout";
+const SERVER_ASSIGNMENT_MARKER = "}getServerAssignment(";
+const EXPERIMENT_EMBED_MARKER = "Clear Treatment ";
+const EXPERIMENT_DEV_LINK_PREFIX = "dev://experiment/";
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.3.2";
+        this.version = this.meta.version || "1.3.3";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.serverAssignmentTargets = new WeakSet();
+        this.devLinkRuleFactories = new WeakSet();
+        this.devLinkRuleTargets = new WeakSet();
         this.lazyGuardAbortController = null;
+        this.DevLinkErrorBoundary = null;
         this.originalFlags = new WeakMap();
         this.forcedMembers = [];
         this.userStore = null;
@@ -150,6 +156,20 @@ module.exports = class Experiments {
                     title: "Fixed",
                     type: "fixed",
                     items: [
+                        "Patched source-identified getServerAssignment store exports in addition to prototype targets."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Wrapped experiment dev-link embed rendering in a local error boundary fallback to prevent malformed links from crashing Discord."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
                         "Stopped trying to redefine Discord's non-configurable isStaff and isStaffPersonal methods, which flooded debug.log with TypeError entries."
                     ]
                 },
@@ -259,7 +279,115 @@ module.exports = class Experiments {
     }
 
     patchExperimentGuards() {
+        this.patchExperimentDevLinkRuntimeGuards();
         this.patchServerAssignmentRuntime();
+    }
+
+    patchExperimentDevLinkRuntimeGuards() {
+        const webpack = BdApi?.Webpack;
+        if (!webpack?.getAllBySource || !BdApi?.Patcher?.after) return;
+
+        try {
+            const modules = webpack.getAllBySource(EXPERIMENT_EMBED_MARKER, {
+                raw: true,
+                fatal: false
+            });
+
+            for (const module of modules || []) {
+                this.patchExperimentDevLinkRuleFactory(module?.exports);
+            }
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to patch experiment dev-link guards.`, error);
+        }
+    }
+
+    patchExperimentDevLinkRuleFactory(exports) {
+        if (!exports || typeof exports.A !== "function") return;
+        if (this.devLinkRuleFactories.has(exports)) return;
+
+        this.devLinkRuleFactories.add(exports);
+
+        BdApi.Patcher.after(this.pluginName, exports, "A", (_, __, rules) => {
+            this.patchExperimentDevLinkRule(rules);
+            return rules;
+        });
+    }
+
+    patchExperimentDevLinkRule(rules) {
+        const devLink = rules?.devLink;
+        if (!devLink || typeof devLink.react !== "function") return;
+        if (this.devLinkRuleTargets.has(devLink)) return;
+        if (!BdApi?.Patcher?.instead) return;
+
+        this.devLinkRuleTargets.add(devLink);
+
+        BdApi.Patcher.instead(this.pluginName, devLink, "react", (thisObject, args, original) => {
+            const url = this.getDevLinkUrl(args?.[0]);
+            if (!this.isExperimentDevLink(url)) return original.apply(thisObject, args);
+
+            try {
+                return this.wrapDevLinkElement(original.apply(thisObject, args), url);
+            }
+            catch (error) {
+                console.error(`[${this.pluginName}] Blocked experiment dev-link render crash.`, error);
+                return this.createDevLinkFallback(url);
+            }
+        });
+    }
+
+    getDevLinkUrl(node) {
+        return Array.isArray(node?.target) ? String(node.target[0] || "") : "";
+    }
+
+    isExperimentDevLink(url) {
+        return url.startsWith(EXPERIMENT_DEV_LINK_PREFIX);
+    }
+
+    wrapDevLinkElement(element, url) {
+        const React = BdApi?.React;
+        const Boundary = this.getDevLinkErrorBoundary();
+        if (!React || !Boundary) return element;
+
+        return React.createElement(Boundary, {
+            fallback: this.createDevLinkFallback(url)
+        }, element);
+    }
+
+    createDevLinkFallback(url) {
+        const React = BdApi?.React;
+        if (!React) return null;
+
+        return React.createElement("span", null, url);
+    }
+
+    getDevLinkErrorBoundary() {
+        if (this.DevLinkErrorBoundary) return this.DevLinkErrorBoundary;
+
+        const React = BdApi?.React;
+        if (!React?.Component) return null;
+
+        const pluginName = this.pluginName;
+        this.DevLinkErrorBoundary = class DevLinkErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = {hasError: false};
+            }
+
+            static getDerivedStateFromError() {
+                return {hasError: true};
+            }
+
+            componentDidCatch(error) {
+                console.error(`[${pluginName}] Blocked experiment dev-link child render crash.`, error);
+            }
+
+            render() {
+                return this.state.hasError ? this.props.fallback : this.props.children;
+            }
+        };
+
+        return this.DevLinkErrorBoundary;
     }
 
     patchServerAssignmentRuntime() {
@@ -269,6 +397,30 @@ module.exports = class Experiments {
 
     patchLoadedServerAssignmentTargets() {
         const webpack = BdApi?.Webpack;
+
+        this.patchLoadedServerAssignmentModulesBySource(webpack);
+        this.patchLoadedServerAssignmentTargetsByPrototype(webpack);
+    }
+
+    patchLoadedServerAssignmentModulesBySource(webpack) {
+        if (!webpack?.getAllBySource) return;
+
+        try {
+            const modules = webpack.getAllBySource(SERVER_ASSIGNMENT_MARKER, {
+                raw: true,
+                fatal: false
+            });
+
+            for (const module of modules || []) {
+                this.patchServerAssignmentRawModule(module);
+            }
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to patch source-matched getServerAssignment modules.`, error);
+        }
+    }
+
+    patchLoadedServerAssignmentTargetsByPrototype(webpack) {
         if (!webpack?.getAllByPrototypeKeys) return;
 
         try {
@@ -293,6 +445,31 @@ module.exports = class Experiments {
 
         this.lazyGuardAbortController = new AbortController();
 
+        this.watchLazyServerAssignmentModulesBySource(webpack);
+        this.watchLazyServerAssignmentTargetsByShape(webpack);
+    }
+
+    watchLazyServerAssignmentModulesBySource(webpack) {
+        const bySource = webpack?.Filters?.bySource;
+        if (!bySource) return;
+
+        try {
+            webpack.waitForModule(bySource(SERVER_ASSIGNMENT_MARKER), {
+                raw: true,
+                fatal: false,
+                signal: this.lazyGuardAbortController.signal
+            }).then(module => this.patchServerAssignmentRawModule(module)).catch(error => {
+                if (error?.name !== "AbortError") {
+                    console.error(`[${this.pluginName}] Failed while waiting for source-matched getServerAssignment module.`, error);
+                }
+            });
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to watch source-matched getServerAssignment module.`, error);
+        }
+    }
+
+    watchLazyServerAssignmentTargetsByShape(webpack) {
         try {
             webpack.waitForModule(target => this.isServerAssignmentTarget(target), {
                 searchExports: true,
@@ -308,6 +485,32 @@ module.exports = class Experiments {
         catch (error) {
             console.error(`[${this.pluginName}] Failed to watch getServerAssignment target.`, error);
         }
+    }
+
+    patchServerAssignmentRawModule(module) {
+        if (!module?.exports) return;
+
+        for (const target of this.getServerAssignmentCandidates(module.exports)) {
+            this.patchServerAssignmentTarget(target);
+        }
+    }
+
+    getServerAssignmentCandidates(exports) {
+        const candidates = new Set();
+        const add = value => {
+            if (!value || (typeof value !== "object" && typeof value !== "function")) return;
+            candidates.add(value);
+            if (value.prototype) candidates.add(value.prototype);
+        };
+
+        add(exports);
+        add(exports.default);
+
+        if (typeof exports === "object") {
+            for (const value of Object.values(exports)) add(value);
+        }
+
+        return candidates;
     }
 
     isServerAssignmentTarget(target) {
