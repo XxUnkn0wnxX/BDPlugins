@@ -1240,8 +1240,10 @@ module.exports = class Experiments {
         card.className = "bd-experiments-warning-card";
         card.innerHTML = `
             <div class="bd-experiments-warning-title">Hold on!!</div>
-            <div>Experiments are unreleased Discord features. They might not work, can break your client, and can put your account at risk.</div>
-            <div>Only use experiments if you know what they do. Server-side features cannot be enabled locally.</div>
+            <div>Experiments are unreleased Discord features. They might not work, or even break your client or get your account disabled.</div>
+            <div>Only use experiments if you know what you're doing. Equicord is not responsible for any damage caused by enabling experiments.</div>
+            <div>If you don't know what an experiment does, ignore it. Do not ask us what experiments do either, we probably don't know.</div>
+            <div>No, you cannot use server-side features like checking the "Send to Client" box.</div>
         `;
 
         container.insertBefore(card, container.firstElementChild);
