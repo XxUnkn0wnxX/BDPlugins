@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.5.0
+ * @version 1.6.0
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -21,12 +21,17 @@ const EXPERIMENT_DEV_LINK_PREFIX = "dev://experiment/";
 const PLAYGROUND_DEV_LINK_PREFIX = "dev://playground/";
 const PLAYGROUND_EMBED_MARKER = "useComponentPlaygroundConfigs";
 const EXPERIMENT_URL_FALLBACK = /^dev:\/\/experiment\/([^/\s]+)(?:\/([^/\s]+))?$/i;
+const SETTING_TOOLBAR_DEV_MENU = "toolbarDevMenu";
+const DEFAULT_SETTINGS = {
+    [SETTING_TOOLBAR_DEV_MENU]: false
+};
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.5.0";
+        this.version = this.meta.version || "1.6.0";
+        this.settings = {...DEFAULT_SETTINGS};
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
         this.serverAssignmentTargets = new WeakSet();
@@ -48,6 +53,7 @@ module.exports = class Experiments {
         this.isRunning = false;
         this.ensureQueued = false;
         this.isEnsuring = false;
+        this.staffHelpClickBlockerActive = false;
         this.staffHelpClickEvents = ["pointerdown", "mousedown", "click", "keydown"];
         this.staffHelpClickHandler = event => this.handleStaffHelpInteraction(event);
     }
@@ -55,6 +61,7 @@ module.exports = class Experiments {
     start() {
         try {
             this.isRunning = true;
+            this.settings = this.loadSettings();
             this.showChangelogIfNeeded();
             this.injectStyles();
             this.resolveInternals();
@@ -145,6 +152,13 @@ module.exports = class Experiments {
                     type: "added",
                     items: [
                         "Added scoped staff-gate wrappers for experiment and playground dev-link embeds without globally forcing Discord staff methods."
+                    ]
+                },
+                {
+                    title: "Added",
+                    type: "added",
+                    items: [
+                        "Added BetterDiscord-native settings for Equicord's toolbar developer menu toggle and DevTools shortcut information."
                     ]
                 },
                 {
@@ -245,6 +259,84 @@ module.exports = class Experiments {
         }
     }
 
+    getSettingsPanel() {
+        this.settings = this.loadSettings();
+
+        return BdApi.UI.buildSettingsPanel({
+            settings: [
+                {
+                    type: "switch",
+                    id: SETTING_TOOLBAR_DEV_MENU,
+                    name: "Toolbar developer menu",
+                    note: "Show Discord's developer toolbar/menu controls near the Help (?) button.",
+                    value: this.settings[SETTING_TOOLBAR_DEV_MENU]
+                },
+                {
+                    type: "keybind",
+                    id: "devtoolsShortcut",
+                    name: "DevTools shortcut",
+                    note: `Open Discord's DevTools with ${this.getDevToolsShortcut()}. This shortcut is provided by Discord and cannot be changed here.`,
+                    value: this.getDevToolsShortcutKeys(),
+                    disabled: true,
+                    clearable: false,
+                    max: 3
+                }
+            ],
+            onChange: (_, id, value) => this.updateSetting(id, value)
+        });
+    }
+
+    getDevToolsShortcut() {
+        const platform = navigator?.platform || "";
+        return /Mac|iPhone|iPad|iPod/i.test(platform) ? "cmd + opt + O" : "ctrl + alt + O";
+    }
+
+    getDevToolsShortcutKeys() {
+        const platform = navigator?.platform || "";
+        return /Mac|iPhone|iPad|iPod/i.test(platform) ? ["cmd", "opt", "O"] : ["Control", "Alt", "O"];
+    }
+
+    loadSettings() {
+        try {
+            const saved = BdApi?.Data?.load?.(this.pluginName, "settings");
+            return {
+                ...DEFAULT_SETTINGS,
+                ...(saved && typeof saved === "object" ? saved : {})
+            };
+        }
+        catch {
+            return {...DEFAULT_SETTINGS};
+        }
+    }
+
+    saveSettings() {
+        try {
+            BdApi?.Data?.save?.(this.pluginName, "settings", this.settings);
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to save settings.`, error);
+        }
+    }
+
+    updateSetting(id, value) {
+        if (!Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS, id)) return;
+
+        this.settings = {
+            ...this.settings,
+            [id]: Boolean(value)
+        };
+        this.saveSettings();
+
+        if (id === SETTING_TOOLBAR_DEV_MENU) {
+            this.injectStyles();
+            if (this.settings[SETTING_TOOLBAR_DEV_MENU]) this.startStaffHelpClickBlocker();
+            else this.stopStaffHelpClickBlocker();
+            this.flushExperimentStores();
+            this.ensureExperiments("settings");
+            this.showToast("Toolbar developer menu setting saved. Reload Discord if the toolbar does not update immediately.", "info");
+        }
+    }
+
     resolveInternals() {
         this.userStore = this.getStore("UserStore") || this.getWebpackModule(module => {
             return module?.getCurrentUser && module?.getUsers;
@@ -307,8 +399,8 @@ module.exports = class Experiments {
         this.bugReporterStores.add(experimentStore);
 
         BdApi.Patcher.instead(this.pluginName, experimentStore, "getUserExperimentBucket", (thisObject, args, original) => {
-            if (!args?.length || typeof args[0] !== "string") return null;
-            if (args?.[0] === BUG_REPORTER_EXPERIMENT) return 1;
+            if (!args?.length || typeof args[0] !== "string") return original.apply(thisObject, args);
+            if (args?.[0] === BUG_REPORTER_EXPERIMENT && this.settings[SETTING_TOOLBAR_DEV_MENU]) return 1;
             return original.apply(thisObject, args);
         });
     }
@@ -877,18 +969,27 @@ module.exports = class Experiments {
     }
 
     startStaffHelpClickBlocker() {
+        if (!this.settings[SETTING_TOOLBAR_DEV_MENU] || this.staffHelpClickBlockerActive) return;
+
         for (const eventName of this.staffHelpClickEvents) {
             document.addEventListener(eventName, this.staffHelpClickHandler, true);
         }
+
+        this.staffHelpClickBlockerActive = true;
     }
 
     stopStaffHelpClickBlocker() {
+        if (!this.staffHelpClickBlockerActive) return;
+
         for (const eventName of this.staffHelpClickEvents) {
             document.removeEventListener(eventName, this.staffHelpClickHandler, true);
         }
+
+        this.staffHelpClickBlockerActive = false;
     }
 
     handleStaffHelpInteraction(event) {
+        if (!this.settings[SETTING_TOOLBAR_DEV_MENU]) return;
         if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
         if (!this.findStaffHelpTrigger(event.target)) return;
 
@@ -1165,8 +1266,15 @@ module.exports = class Experiments {
     injectStyles() {
         const css = `
             #staff-help-popout-staff-help-bug-reporter {
+                ${this.settings[SETTING_TOOLBAR_DEV_MENU] ? "display: none !important;" : ""}
+            }
+
+            ${this.settings[SETTING_TOOLBAR_DEV_MENU] ? "" : `
+            [aria-label="DevTools"][role="button"],
+            [aria-label="DevTools"].clickable__81391 {
                 display: none !important;
             }
+            `}
 
             .bd-experiments-warning-card {
                 background: var(--background-secondary);
