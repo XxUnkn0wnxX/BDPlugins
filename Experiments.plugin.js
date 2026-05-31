@@ -1,7 +1,7 @@
 /**
  * @name Experiments
  * @author openAI
- * @version 1.3.0
+ * @version 1.3.2
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -14,20 +14,16 @@ const PLUGIN_NAME = "Experiments";
 const DEV_FLAG = 1;
 const BUG_REPORTER_EXPERIMENT = "2026-01-bug-reporter";
 const STAFF_HELP_POPOUT = "staff-help-popout";
-const EXPERIMENT_EMBED_MARKER = "Clear Treatment ";
 
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.3.0";
+        this.version = this.meta.version || "1.3.2";
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
-        this.webpackRequire = null;
-        this.chunkArray = null;
-        this.originalChunkPush = null;
-        this.chunkPushWrapper = null;
-        this.originalWebpackFactories = new Map();
+        this.serverAssignmentTargets = new WeakSet();
+        this.lazyGuardAbortController = null;
         this.originalFlags = new WeakMap();
         this.forcedMembers = [];
         this.userStore = null;
@@ -49,7 +45,7 @@ module.exports = class Experiments {
             this.resolveInternals();
             this.patchUserStore();
             this.patchExperimentStores();
-            this.patchExperimentLinkEmbeds();
+            this.patchExperimentGuards();
             this.startStaffHelpClickBlocker();
             this.ensureExperiments("start");
             this.startDomObserver();
@@ -76,14 +72,14 @@ module.exports = class Experiments {
         }
 
         this.stopStaffHelpClickBlocker();
-        this.restoreWebpackChunkPush();
 
         try {
             BdApi?.Patcher?.unpatchAll?.(this.pluginName);
         }
         catch {}
 
-        this.restoreWebpackFactories();
+        this.lazyGuardAbortController?.abort?.();
+        this.lazyGuardAbortController = null;
         this.restoreForcedMembers();
         this.restoreUserFlags();
         this.flushExperimentStores();
@@ -126,7 +122,28 @@ module.exports = class Experiments {
                     title: "Added",
                     type: "added",
                     items: [
-                        "Enabled experiment link embeds by patching Discord's experiment embed module when its exact source marker is present."
+                        "Added BetterDiscord-owned runtime guards for experiment embed assignment lookups."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Added a getServerAssignment null guard for malformed experiment embed data."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Removed direct Webpack chunk push wrapping and avoided private plugin-library require access so other plugins can keep their module hooks stable."
+                    ]
+                },
+                {
+                    title: "Fixed",
+                    type: "fixed",
+                    items: [
+                        "Disabled unsupported source-factory rewriting until the experiment embed module can be ported with BetterDiscord-owned APIs only."
                     ]
                 },
                 {
@@ -241,91 +258,75 @@ module.exports = class Experiments {
         });
     }
 
-    patchExperimentLinkEmbeds() {
-        const webpackRequire = this.getWebpackRequire();
-        this.patchWebpackFactoryMap(webpackRequire?.m);
-        this.patchWebpackChunkPush();
+    patchExperimentGuards() {
+        this.patchServerAssignmentRuntime();
     }
 
-    patchWebpackChunkPush() {
-        const chunkArray = window.webpackChunkdiscord_app;
-        if (!Array.isArray(chunkArray) || typeof chunkArray.push !== "function") return;
-        if (this.chunkPushWrapper) return;
-
-        this.chunkArray = chunkArray;
-        this.originalChunkPush = chunkArray.push;
-        this.chunkPushWrapper = (...args) => {
-            if (this.isRunning) this.patchWebpackFactoryMap(args?.[0]?.[1]);
-            return this.originalChunkPush.apply(chunkArray, args);
-        };
-
-        chunkArray.push = this.chunkPushWrapper;
+    patchServerAssignmentRuntime() {
+        this.patchLoadedServerAssignmentTargets();
+        this.watchLazyServerAssignmentTargets();
     }
 
-    restoreWebpackChunkPush() {
-        if (this.chunkArray?.push === this.chunkPushWrapper) {
-            this.chunkArray.push = this.originalChunkPush;
-        }
+    patchLoadedServerAssignmentTargets() {
+        const webpack = BdApi?.Webpack;
+        if (!webpack?.getAllByPrototypeKeys) return;
 
-        this.chunkArray = null;
-        this.originalChunkPush = null;
-        this.chunkPushWrapper = null;
-    }
-
-    patchWebpackFactoryMap(moduleFactories) {
-        if (!moduleFactories || typeof moduleFactories !== "object") return;
-
-        for (const [moduleId, factory] of Object.entries(moduleFactories)) {
-            if (typeof factory !== "function") continue;
-            if (this.originalWebpackFactories.has(moduleId)) continue;
-
-            const source = Function.prototype.toString.call(factory);
-            if (!source.includes(EXPERIMENT_EMBED_MARKER)) continue;
-
-            const patchedSource = this.patchExperimentEmbedSource(source);
-            if (!patchedSource || patchedSource === source) continue;
-
-            const patchedFactory = this.createWebpackFactory(patchedSource, moduleId);
-            if (!patchedFactory) continue;
-
-            this.originalWebpackFactories.set(moduleId, factory);
-            moduleFactories[moduleId] = patchedFactory;
-        }
-    }
-
-    patchExperimentEmbedSource(source) {
-        let patchedSource = source.replace(/[$_\w]+\?\.isStaff\(\)/, "true");
-
-        patchedSource = patchedSource.replace(
-            /\.isStaffPersonal\(\).+?if\(null==([A-Za-z_$][\w$]*)\|\|null==[A-Za-z_$][\w$]*(?=\)return null;)/,
-            (match, experimentKey) => `${match}||({})[${experimentKey}]!=null`
-        );
-
-        return patchedSource;
-    }
-
-    createWebpackFactory(source, moduleId) {
         try {
-            return (0, eval)(`(${source})`);
+            const targets = webpack.getAllByPrototypeKeys("getServerAssignment", {
+                searchExports: true,
+                defaultExport: false,
+                fatal: false
+            });
+
+            for (const target of targets || []) {
+                this.patchServerAssignmentTarget(target);
+            }
         }
         catch (error) {
-            console.error(`[${this.pluginName}] Failed to patch experiment embed module ${moduleId}.`, error);
-            return null;
+            console.error(`[${this.pluginName}] Failed to patch loaded getServerAssignment targets.`, error);
         }
     }
 
-    restoreWebpackFactories() {
-        const moduleFactories = this.webpackRequire?.m;
-        if (!moduleFactories) {
-            this.originalWebpackFactories.clear();
-            return;
-        }
+    watchLazyServerAssignmentTargets() {
+        const webpack = BdApi?.Webpack;
+        if (!webpack?.waitForModule || this.lazyGuardAbortController) return;
 
-        for (const [moduleId, factory] of this.originalWebpackFactories) {
-            moduleFactories[moduleId] = factory;
-        }
+        this.lazyGuardAbortController = new AbortController();
 
-        this.originalWebpackFactories.clear();
+        try {
+            webpack.waitForModule(target => this.isServerAssignmentTarget(target), {
+                searchExports: true,
+                defaultExport: false,
+                fatal: false,
+                signal: this.lazyGuardAbortController.signal
+            }).then(target => this.patchServerAssignmentTarget(target)).catch(error => {
+                if (error?.name !== "AbortError") {
+                    console.error(`[${this.pluginName}] Failed while waiting for getServerAssignment target.`, error);
+                }
+            });
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to watch getServerAssignment target.`, error);
+        }
+    }
+
+    isServerAssignmentTarget(target) {
+        return typeof target?.prototype?.getServerAssignment === "function"
+            || typeof target?.getServerAssignment === "function";
+    }
+
+    patchServerAssignmentTarget(target) {
+        const patchTarget = typeof target?.prototype?.getServerAssignment === "function" ? target.prototype : target;
+        if (!patchTarget || typeof patchTarget.getServerAssignment !== "function") return;
+        if (this.serverAssignmentTargets.has(patchTarget)) return;
+        if (!BdApi?.Patcher?.instead) return;
+
+        this.serverAssignmentTargets.add(patchTarget);
+
+        BdApi.Patcher.instead(this.pluginName, patchTarget, "getServerAssignment", (thisObject, args, original) => {
+            if (args?.[0] == null) return undefined;
+            return original.apply(thisObject, args);
+        });
     }
 
     startStaffHelpClickBlocker() {
@@ -557,25 +558,6 @@ module.exports = class Experiments {
         catch {}
 
         return null;
-    }
-
-    getWebpackRequire() {
-        if (this.webpackRequire) return this.webpackRequire;
-
-        try {
-            const chunkArray = window.webpackChunkdiscord_app;
-            if (!Array.isArray(chunkArray)) return null;
-
-            chunkArray.push([[`${this.pluginName}-webpack-${Date.now()}`], {}, webpackRequire => {
-                this.webpackRequire = webpackRequire;
-            }]);
-            chunkArray.pop();
-        }
-        catch (error) {
-            console.error(`[${this.pluginName}] Failed to resolve Webpack require.`, error);
-        }
-
-        return this.webpackRequire;
     }
 
     startDomObserver() {
