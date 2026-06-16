@@ -10,7 +10,6 @@
 "use strict";
 
 const PLUGIN_NAME = "EmbedCopy";
-const MENU_PATCH_DELAY_MS = 1500;
 
 module.exports = class EmbedCopy {
     constructor(meta) {
@@ -18,13 +17,12 @@ module.exports = class EmbedCopy {
         this.pluginName = this.meta.name || PLUGIN_NAME;
         this.version = this.meta.version || "1.0.0";
         this.unpatchMessageMenu = null;
-        this.patchTimer = null;
     }
 
     start() {
         try {
             this.showChangelogIfNeeded();
-            this.scheduleMessageMenuPatch();
+            this.patchMessageMenu();
         }
         catch (error) {
             this.reportError("Failed to start.", error);
@@ -33,11 +31,6 @@ module.exports = class EmbedCopy {
     }
 
     stop() {
-        if (this.patchTimer) {
-            clearTimeout(this.patchTimer);
-            this.patchTimer = null;
-        }
-
         try {
             this.unpatchMessageMenu?.();
         }
@@ -94,21 +87,6 @@ module.exports = class EmbedCopy {
         }
     }
 
-    scheduleMessageMenuPatch() {
-        if (this.patchTimer || this.unpatchMessageMenu) return;
-
-        this.patchTimer = setTimeout(() => {
-            this.patchTimer = null;
-
-            try {
-                this.patchMessageMenu();
-            }
-            catch (error) {
-                this.reportError("Failed to patch the message context menu.", error);
-            }
-        }, MENU_PATCH_DELAY_MS);
-    }
-
     patchMessageMenu() {
         if (this.unpatchMessageMenu) return;
 
@@ -129,12 +107,10 @@ module.exports = class EmbedCopy {
                 if (menuGroup.some(item => this.nodeHasMenuId(item, "embed-copy"))) return menu;
 
                 const buttonIndex = this.findMenuItemIndex(menuGroup, "copy-message");
-                const fallbackIndex = this.findCopierFallbackIndex(menuGroup);
+                const fallbackIndex = this.findFallbackInsertIndex(menuGroup);
                 const insertIndex = buttonIndex >= 0
                     ? buttonIndex + 1
-                    : fallbackIndex >= 0
-                        ? fallbackIndex + 1
-                        : menuGroup.length;
+                    : fallbackIndex;
                 const selectedEmbed = this.resolveSelectedEmbed(props, embeds) ?? embeds[0];
                 const items = buttonIndex >= 0
                     ? [this.buildEmbedCopyMenuItem(selectedEmbed, embeds)]
@@ -230,11 +206,20 @@ module.exports = class EmbedCopy {
         return group.findIndex(item => this.nodeHasMenuId(item, "delete") || this.nodeHasMenuId(item, "report"));
     }
 
-    findCopierFallbackIndex(group) {
-        return group.findIndex(item => {
+    findFallbackInsertIndex(group) {
+        const reportIndex = group.findIndex(item => {
             const id = this.findFirstMenuId(item);
-            return this.menuIdMatches(id, "delete") || this.menuIdMatches(id, "report");
+            return this.menuIdMatches(id, "report");
         });
+        if (reportIndex >= 0) return reportIndex;
+
+        const deleteIndex = group.findIndex(item => {
+            const id = this.findFirstMenuId(item);
+            return this.menuIdMatches(id, "delete");
+        });
+        if (deleteIndex >= 0) return deleteIndex + 1;
+
+        return group.length;
     }
 
     findMenuItemIndex(group, id) {
