@@ -120,17 +120,10 @@ module.exports = class EmbedCopy {
                 const insertIndex = buttonIndex >= 0
                     ? buttonIndex + 1
                     : fallbackIndex;
-                const items = [
-                    {
-                        type: "separator"
-                    },
-                    this.buildEmbedCopyMenuItem(selectedEmbed, embeds)
-                ];
-
                 menuGroup.splice(
                     insertIndex,
                     0,
-                    contextMenu.buildMenuChildren(items)
+                    contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds))
                 );
             }
             catch (error) {
@@ -241,13 +234,20 @@ module.exports = class EmbedCopy {
         group.splice(
             buttonIndex + 1,
             0,
-            contextMenu.buildMenuChildren([
-                {
-                    type: "separator"
-                },
-                this.buildEmbedCopyMenuItem(selectedEmbed, embeds)
-            ])
+            contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds))
         );
+    }
+
+    buildEmbedCopyMenuBlock(selectedEmbed, embeds) {
+        return [
+            {
+                type: "separator"
+            },
+            this.buildEmbedCopyMenuItem(selectedEmbed, embeds),
+            {
+                type: "separator"
+            }
+        ];
     }
 
     buildEmbedCopyMenuItem(selectedEmbed, embeds) {
