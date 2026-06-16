@@ -1,7 +1,7 @@
 /**
  * @name EmbedCopy
  * @author openAI
- * @version 1.0.2
+ * @version 1.0.3
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -10,24 +10,24 @@
 "use strict";
 
 const PLUGIN_NAME = "EmbedCopy";
+const SETTING_RAW_EXPOSE_ALL = "rawExposeAll";
 const SETTING_INCLUDE_MESSAGE_CONTEXT = "includeMessageContext";
 const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
 const SETTING_DISCOHOOK_TARGET = "discohookTarget";
 const DISCOHOOK_TARGET_APP = "app";
 const DISCOHOOK_TARGET_ORG = "org";
 const DEFAULT_SETTINGS = {
+    [SETTING_RAW_EXPOSE_ALL]: false,
     [SETTING_INCLUDE_MESSAGE_CONTEXT]: false,
     [SETTING_INCLUDE_FORUM_THREAD]: false,
     [SETTING_DISCOHOOK_TARGET]: DISCOHOOK_TARGET_APP
 };
-const MESSAGE_FLAG_SUPPRESS_EMBEDS = 1 << 2;
-const MESSAGE_FLAG_SUPPRESS_NOTIFICATIONS = 1 << 12;
 
 module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.2";
+        this.version = this.meta.version || "1.0.3";
         this.unpatchMessageMenu = null;
         this.settings = {...DEFAULT_SETTINGS};
     }
@@ -45,48 +45,67 @@ module.exports = class EmbedCopy {
     }
 
     getSettingsPanel() {
-        this.settings = this.loadSettings();
+        this.settings = {
+            ...DEFAULT_SETTINGS,
+            ...this.settings
+        };
 
-        return BdApi.UI.buildSettingsPanel({
+        const panel = BdApi.UI.buildSettingsPanel({
             settings: [
+                {
+                    type: "switch",
+                    id: SETTING_RAW_EXPOSE_ALL,
+                    name: "Raw Expose All",
+                    note: "Raw copies all captured message data, including flags, without filters.",
+                    value: this.settings[SETTING_RAW_EXPOSE_ALL]
+                },
                 {
                     type: "switch",
                     id: SETTING_INCLUDE_MESSAGE_CONTEXT,
                     name: "Include message context",
-                    note: "Add available message content, webhook profile, and flag data to Raw and Discohook copies.",
+                    note: "Add available message content and webhook profile data to Raw and Discohook copies.",
                     value: this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
                 },
                 {
-                    type: "switch",
-                    id: SETTING_INCLUDE_FORUM_THREAD,
-                    name: "Include forum thread fields",
-                    note: "Add Forum Thread Name and Thread ID to Raw and Discohook copies when Discord exposes them.",
-                    value: this.settings[SETTING_INCLUDE_FORUM_THREAD],
-                    disabled: !this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
-                },
-                {
-                    type: "radio",
-                    id: SETTING_DISCOHOOK_TARGET,
-                    name: "Discohook target",
-                    note: "Use .app for Thread ID support. Legacy .org omits Thread ID.",
-                    value: this.settings[SETTING_DISCOHOOK_TARGET],
-                    disabled: !this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT] || !this.settings[SETTING_INCLUDE_FORUM_THREAD],
-                    options: [
+                    type: "category",
+                    id: "discohook",
+                    name: "Discohook",
+                    collapsible: true,
+                    shown: false,
+                    settings: [
                         {
-                            name: "discohook.app",
-                            value: DISCOHOOK_TARGET_APP,
-                            desc: "Includes Thread ID when forum thread fields are enabled."
+                            type: "switch",
+                            id: SETTING_INCLUDE_FORUM_THREAD,
+                            name: "Include forum thread fields",
+                            note: "Thread Name creates a forum post. Thread ID edits an existing thread.",
+                            value: this.settings[SETTING_INCLUDE_FORUM_THREAD]
                         },
                         {
-                            name: "discohook.org",
-                            value: DISCOHOOK_TARGET_ORG,
-                            desc: "Omits Thread ID for legacy import compatibility."
+                            type: "radio",
+                            id: SETTING_DISCOHOOK_TARGET,
+                            name: "Discohook target",
+                            note: "Sets Discohook export compatibility when forum thread fields are enabled.",
+                            value: this.settings[SETTING_DISCOHOOK_TARGET],
+                            options: [
+                                {
+                                    name: "discohook.app",
+                                    value: DISCOHOOK_TARGET_APP,
+                                    desc: "Includes Thread ID when forum thread fields are enabled."
+                                },
+                                {
+                                    name: "discohook.org",
+                                    value: DISCOHOOK_TARGET_ORG,
+                                    desc: "Omits Thread ID for legacy import compatibility."
+                                }
+                            ]
                         }
                     ]
                 }
             ],
             onChange: (_, id, value) => this.updateSetting(id, value)
         });
+
+        return panel;
     }
 
     loadSettings() {
@@ -146,8 +165,8 @@ module.exports = class EmbedCopy {
                     type: "progress",
                     items: [
                         "Added optional message and forum thread context settings for Raw and Discohook copies.",
-                        "Resolved attachment and proxy media URLs when converting embed images/icons.",
-                        "Added Discohook app/org targeting for Thread ID compatibility."
+                        "Added Raw Expose All for full raw message dumps.",
+                        "Grouped Discohook options and omitted suppress flag output from converted templates."
                     ]
                 }
             ]
@@ -455,13 +474,8 @@ module.exports = class EmbedCopy {
     }
 
     copyRawEmbed(embed, messageContext) {
-        if (this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]) {
-            const payload = this.buildRawMessagePayload(embed, messageContext);
-            this.copyJson(payload, "Copied raw embed context.");
-            return;
-        }
-
-        this.copyJson(embed, "Copied raw embed.");
+        const payload = this.buildRawMessagePayload(embed, messageContext);
+        this.copyJson(payload, payload === embed ? "Copied raw embed." : "Copied raw embed context.");
     }
 
     copyCarlEmbed(embed) {
@@ -483,12 +497,12 @@ module.exports = class EmbedCopy {
                 includeType: false,
                 includeProvider: true,
                 includeVideo: true,
-                includeFlags: true,
+                includeFlags: false,
                 attachments: messageContext?.attachments
             })).filter(embed => Object.keys(embed).length)
         };
 
-        if (this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]) {
+        if (this.shouldCopyDiscohookMessageContext()) {
             this.applyDiscohookMessageContext(payload, messageContext);
         }
 
@@ -496,7 +510,7 @@ module.exports = class EmbedCopy {
     }
 
     buildRawMessagePayload(selectedEmbed, messageContext) {
-        const message = messageContext?.message || {};
+        const exposeAll = this.settings[SETTING_RAW_EXPOSE_ALL];
         const payload = {
             embed: selectedEmbed
         };
@@ -505,12 +519,12 @@ module.exports = class EmbedCopy {
         if (Object.keys(context).length) payload.message = context;
 
         const embeds = this.toEmbedArray(messageContext?.embeds);
-        if (embeds.length > 1) payload.embeds = embeds;
+        if (exposeAll && embeds.length > 1) payload.embeds = embeds;
 
         const selectedIndex = embeds.indexOf(selectedEmbed);
-        if (selectedIndex >= 0) payload.selected_embed_index = selectedIndex;
+        if (exposeAll && selectedIndex >= 0) payload.selected_embed_index = selectedIndex;
 
-        if (!Object.keys(context).length && embeds.length <= 1) return selectedEmbed;
+        if (!Object.keys(context).length && (!exposeAll || embeds.length <= 1)) return selectedEmbed;
 
         return payload;
     }
@@ -518,40 +532,50 @@ module.exports = class EmbedCopy {
     normalizeRawMessageContext(messageContext) {
         const context = {};
         const message = messageContext?.message || {};
+        const exposeAll = this.settings[SETTING_RAW_EXPOSE_ALL];
+        const includeMessageContext = exposeAll || this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT];
+        const includeForumThread = exposeAll || this.settings[SETTING_INCLUDE_FORUM_THREAD];
         const author = this.normalizeWebhookProfile(messageContext);
-        const thread = this.settings[SETTING_INCLUDE_FORUM_THREAD]
-            ? this.normalizeThreadContext(messageContext)
-            : {};
-        const flags = this.normalizeWebhookMessageFlags(messageContext?.flags);
+        const thread = this.normalizeThreadContext(messageContext);
+        const flags = this.normalizeInteger(this.pickValue(messageContext, ["flags"]));
         const attachments = this.normalizeAttachments(messageContext?.attachments);
 
-        this.assignIfPresent(context, "id", this.pickString(message, ["id"]));
-        this.assignIfPresent(context, "channel_id", this.pickString(message, ["channel_id", "channelId"]));
-        this.assignIfPresent(context, "guild_id", this.pickString(message, ["guild_id", "guildId"]));
-        this.assignIfPresent(context, "content", messageContext?.content);
-        this.assignObjectIfPresent(context, "author", author);
-        this.assignObjectIfPresent(context, "thread", thread);
-        if (flags !== null) context.flags = flags;
-        if (attachments.length) context.attachments = attachments;
+        if (includeMessageContext) {
+            this.assignIfPresent(context, "id", this.pickString(message, ["id"]));
+            this.assignIfPresent(context, "channel_id", this.pickString(message, ["channel_id", "channelId"]));
+            this.assignIfPresent(context, "guild_id", this.pickString(message, ["guild_id", "guildId"]));
+            this.assignIfPresent(context, "content", messageContext?.content);
+            this.assignObjectIfPresent(context, "author", author);
+            if (attachments.length) context.attachments = attachments;
+        }
+
+        if (includeForumThread) this.assignObjectIfPresent(context, "thread", thread);
+        if (exposeAll && flags !== null) context.flags = flags;
 
         return context;
     }
 
     applyDiscohookMessageContext(payload, messageContext) {
+        const includeMessageContext = this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT];
         const profile = this.normalizeWebhookProfile(messageContext);
         const thread = this.settings[SETTING_INCLUDE_FORUM_THREAD]
             ? this.normalizeThreadContext(messageContext)
             : {};
-        const flags = this.normalizeWebhookMessageFlags(messageContext?.flags);
 
-        this.assignIfPresent(payload, "content", messageContext?.content);
-        this.assignIfPresent(payload, "username", profile.name);
-        this.assignIfPresent(payload, "avatar_url", profile.avatar_url);
+        if (includeMessageContext) {
+            this.assignIfPresent(payload, "content", messageContext?.content);
+            this.assignIfPresent(payload, "username", profile.name);
+            this.assignIfPresent(payload, "avatar_url", profile.avatar_url);
+        }
+
         this.assignIfPresent(payload, "thread_name", thread.name);
         if (this.settings[SETTING_DISCOHOOK_TARGET] !== DISCOHOOK_TARGET_ORG) {
             this.assignIfPresent(payload, "thread_id", thread.id);
         }
-        if (flags !== null) payload.flags = flags;
+    }
+
+    shouldCopyDiscohookMessageContext() {
+        return Boolean(this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT] || this.settings[SETTING_INCLUDE_FORUM_THREAD]);
     }
 
     normalizeWebhookProfile(messageContext) {
@@ -612,14 +636,6 @@ module.exports = class EmbedCopy {
 
         const type = this.normalizeInteger(channel.type);
         return Boolean(channel.threadMetadata || channel.parent_id || channel.parentId || [10, 11, 12].includes(type));
-    }
-
-    normalizeWebhookMessageFlags(flags) {
-        const value = this.normalizeInteger(flags);
-        if (value === null) return null;
-
-        const allowed = value & (MESSAGE_FLAG_SUPPRESS_EMBEDS | MESSAGE_FLAG_SUPPRESS_NOTIFICATIONS);
-        return allowed || null;
     }
 
     normalizeAttachments(attachments) {
