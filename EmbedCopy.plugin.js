@@ -1,7 +1,7 @@
 /**
  * @name EmbedCopy
  * @author openAI
- * @version 1.0.0
+ * @version 1.0.1
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -15,7 +15,7 @@ module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.0";
+        this.version = this.meta.version || "1.0.1";
         this.unpatchMessageMenu = null;
     }
 
@@ -52,19 +52,12 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added an EmbedCopy submenu to Discord message context menus when a message contains embeds.",
-                        "Added copy actions for raw Discord embed data, Carl-bot embed JSON, and Discohook webhook JSON."
-                    ]
-                },
-                {
-                    title: "Notes",
+                    title: "Summary",
                     type: "progress",
                     items: [
-                        "Carl output is a single normalized embed object for !cembed/!ecembed.",
-                        "Discohook output is a message wrapper with an embeds array so multi-embed messages can be imported."
+                        "Added Raw, Carl, and Discohook embed copy actions for messages with embeds.",
+                        "Aligned EmbedCopy placement under Copier with separated menu spacing.",
+                        "Cleaned Carl and Discohook exports for template import compatibility."
                     ]
                 }
             ]
@@ -348,7 +341,7 @@ module.exports = class EmbedCopy {
     copyCarlEmbed(embed) {
         const payload = this.normalizeEmbed(embed, {
             keepReadOnlyMediaData: false,
-            includeType: true,
+            includeType: false,
             includeProvider: false,
             includeVideo: false,
             includeFlags: false
