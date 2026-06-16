@@ -60,19 +60,19 @@ module.exports = class EmbedCopy {
                     value: this.settings[SETTING_RAW_EXPOSE_ALL]
                 },
                 {
-                    type: "switch",
-                    id: SETTING_INCLUDE_MESSAGE_CONTEXT,
-                    name: "Include message context",
-                    note: "Add available message content and webhook profile data to Raw and Discohook copies.",
-                    value: this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
-                },
-                {
                     type: "category",
                     id: "discohook",
                     name: "Discohook",
                     collapsible: true,
                     shown: false,
                     settings: [
+                        {
+                            type: "switch",
+                            id: SETTING_INCLUDE_MESSAGE_CONTEXT,
+                            name: "Include message context",
+                            note: "Message body fields: content, author, username, avatar_url, id, channel_id, guild_id, attachments.",
+                            value: this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
+                        },
                         {
                             type: "switch",
                             id: SETTING_INCLUDE_FORUM_THREAD,
