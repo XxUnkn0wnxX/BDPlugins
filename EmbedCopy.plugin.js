@@ -1,7 +1,7 @@
 /**
  * @name EmbedCopy
  * @author openAI
- * @version 1.0.1
+ * @version 1.0.2
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -10,17 +10,31 @@
 "use strict";
 
 const PLUGIN_NAME = "EmbedCopy";
+const SETTING_INCLUDE_MESSAGE_CONTEXT = "includeMessageContext";
+const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
+const SETTING_DISCOHOOK_TARGET = "discohookTarget";
+const DISCOHOOK_TARGET_APP = "app";
+const DISCOHOOK_TARGET_ORG = "org";
+const DEFAULT_SETTINGS = {
+    [SETTING_INCLUDE_MESSAGE_CONTEXT]: false,
+    [SETTING_INCLUDE_FORUM_THREAD]: false,
+    [SETTING_DISCOHOOK_TARGET]: DISCOHOOK_TARGET_APP
+};
+const MESSAGE_FLAG_SUPPRESS_EMBEDS = 1 << 2;
+const MESSAGE_FLAG_SUPPRESS_NOTIFICATIONS = 1 << 12;
 
 module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.1";
+        this.version = this.meta.version || "1.0.2";
         this.unpatchMessageMenu = null;
+        this.settings = {...DEFAULT_SETTINGS};
     }
 
     start() {
         try {
+            this.settings = this.loadSettings();
             this.showChangelogIfNeeded();
             this.patchMessageMenu();
         }
@@ -28,6 +42,82 @@ module.exports = class EmbedCopy {
             this.reportError("Failed to start.", error);
             this.stop();
         }
+    }
+
+    getSettingsPanel() {
+        this.settings = this.loadSettings();
+
+        return BdApi.UI.buildSettingsPanel({
+            settings: [
+                {
+                    type: "switch",
+                    id: SETTING_INCLUDE_MESSAGE_CONTEXT,
+                    name: "Include message context",
+                    note: "Add available message content, webhook profile, and flag data to Raw and Discohook copies.",
+                    value: this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
+                },
+                {
+                    type: "switch",
+                    id: SETTING_INCLUDE_FORUM_THREAD,
+                    name: "Include forum thread fields",
+                    note: "Add Forum Thread Name and Thread ID to Raw and Discohook copies when Discord exposes them.",
+                    value: this.settings[SETTING_INCLUDE_FORUM_THREAD],
+                    disabled: !this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
+                },
+                {
+                    type: "radio",
+                    id: SETTING_DISCOHOOK_TARGET,
+                    name: "Discohook target",
+                    note: "Use .app for Thread ID support. Legacy .org omits Thread ID.",
+                    value: this.settings[SETTING_DISCOHOOK_TARGET],
+                    disabled: !this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT] || !this.settings[SETTING_INCLUDE_FORUM_THREAD],
+                    options: [
+                        {
+                            name: "discohook.app",
+                            value: DISCOHOOK_TARGET_APP,
+                            desc: "Includes Thread ID when forum thread fields are enabled."
+                        },
+                        {
+                            name: "discohook.org",
+                            value: DISCOHOOK_TARGET_ORG,
+                            desc: "Omits Thread ID for legacy import compatibility."
+                        }
+                    ]
+                }
+            ],
+            onChange: (_, id, value) => this.updateSetting(id, value)
+        });
+    }
+
+    loadSettings() {
+        try {
+            const stored = BdApi?.Data?.load?.(this.pluginName, "settings");
+            return {
+                ...DEFAULT_SETTINGS,
+                ...(stored && typeof stored === "object" ? stored : {})
+            };
+        }
+        catch (error) {
+            this.reportError("Failed to load settings.", error);
+            return {...DEFAULT_SETTINGS};
+        }
+    }
+
+    saveSettings() {
+        try {
+            BdApi?.Data?.save?.(this.pluginName, "settings", this.settings);
+        }
+        catch (error) {
+            this.reportError("Failed to save settings.", error);
+        }
+    }
+
+    updateSetting(id, value) {
+        this.settings = {
+            ...this.settings,
+            [id]: value
+        };
+        this.saveSettings();
     }
 
     stop() {
@@ -55,9 +145,9 @@ module.exports = class EmbedCopy {
                     title: "Summary",
                     type: "progress",
                     items: [
-                        "Added Raw, Carl, and Discohook embed copy actions for messages with embeds.",
-                        "Aligned EmbedCopy placement under Copier with separated menu spacing.",
-                        "Cleaned Carl and Discohook exports for template import compatibility."
+                        "Added optional message and forum thread context settings for Raw and Discohook copies.",
+                        "Resolved attachment and proxy media URLs when converting embed images/icons.",
+                        "Added Discohook app/org targeting for Thread ID compatibility."
                     ]
                 }
             ]
@@ -90,8 +180,8 @@ module.exports = class EmbedCopy {
 
         this.unpatchMessageMenu = contextMenu.patch("message", (menu, props) => {
             try {
-                const message = props?.message;
-                const embeds = this.getMessageEmbeds(message, props);
+                const messageContext = this.getMessageContext(props?.message, props);
+                const embeds = messageContext.embeds;
                 if (!embeds.length) return menu;
 
                 const menuGroup = this.findMessageActionGroup(menu);
@@ -103,7 +193,7 @@ module.exports = class EmbedCopy {
 
                 if (existingEmbedCopyIndex >= 0) {
                     if (buttonIndex >= 0) {
-                        this.rebuildEmbedCopyPlacement(menuGroup, contextMenu, selectedEmbed, embeds, existingEmbedCopyIndex);
+                        this.rebuildEmbedCopyPlacement(menuGroup, contextMenu, selectedEmbed, embeds, messageContext, existingEmbedCopyIndex);
                     }
 
                     return menu;
@@ -116,7 +206,7 @@ module.exports = class EmbedCopy {
                 menuGroup.splice(
                     insertIndex,
                     0,
-                    contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds))
+                    contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds, messageContext))
                 );
             }
             catch (error) {
@@ -127,12 +217,22 @@ module.exports = class EmbedCopy {
         });
     }
 
-    getMessageEmbeds(message, props = {}) {
-        const directEmbeds = this.toEmbedArray(message?.embeds);
-        if (directEmbeds.length) return directEmbeds;
-
+    getMessageContext(message, props = {}) {
         const storeMessage = this.getStoreMessage(message, props);
-        return this.toEmbedArray(storeMessage?.embeds);
+        const sourceMessage = storeMessage || message || {};
+        const storeEmbeds = this.toEmbedArray(storeMessage?.embeds);
+        const directEmbeds = this.toEmbedArray(message?.embeds);
+
+        return {
+            message: sourceMessage,
+            props,
+            embeds: storeEmbeds.length ? storeEmbeds : directEmbeds,
+            content: this.pickString(sourceMessage, ["content", "rawContent"]),
+            author: sourceMessage?.author || message?.author,
+            channel: props?.channel || sourceMessage?.channel,
+            attachments: this.toArrayLike(sourceMessage?.attachments || message?.attachments),
+            flags: this.normalizeInteger(this.pickValue(sourceMessage, ["flags"]))
+        };
     }
 
     toEmbedArray(embeds) {
@@ -156,6 +256,26 @@ module.exports = class EmbedCopy {
             for (let index = 0; index < embeds.length; index++) {
                 const embed = embeds[index];
                 if (embed && typeof embed === "object") values.push(embed);
+            }
+
+            return values;
+        }
+
+        return [];
+    }
+
+    toArrayLike(value) {
+        if (!value) return [];
+        if (Array.isArray(value)) return value.filter(item => item && typeof item === "object");
+        if (typeof value.toArray === "function") return this.toArrayLike(value.toArray());
+        if (typeof value.values === "function") return this.toArrayLike(Array.from(value.values()));
+
+        if (typeof value.length === "number") {
+            const values = [];
+
+            for (let index = 0; index < value.length; index++) {
+                const item = value[index];
+                if (item && typeof item === "object") values.push(item);
             }
 
             return values;
@@ -218,7 +338,7 @@ module.exports = class EmbedCopy {
         return group.findIndex(item => this.nodeHasMenuId(item, id));
     }
 
-    rebuildEmbedCopyPlacement(group, contextMenu, selectedEmbed, embeds, existingIndex) {
+    rebuildEmbedCopyPlacement(group, contextMenu, selectedEmbed, embeds, messageContext, existingIndex) {
         group.splice(existingIndex, 1);
 
         const buttonIndex = this.findMenuItemIndex(group, "copy-message");
@@ -227,23 +347,23 @@ module.exports = class EmbedCopy {
         group.splice(
             buttonIndex + 1,
             0,
-            contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds))
+            contextMenu.buildMenuChildren(this.buildEmbedCopyMenuBlock(selectedEmbed, embeds, messageContext))
         );
     }
 
-    buildEmbedCopyMenuBlock(selectedEmbed, embeds) {
+    buildEmbedCopyMenuBlock(selectedEmbed, embeds, messageContext) {
         return [
             {
                 type: "separator"
             },
-            this.buildEmbedCopyMenuItem(selectedEmbed, embeds),
+            this.buildEmbedCopyMenuItem(selectedEmbed, embeds, messageContext),
             {
                 type: "separator"
             }
         ];
     }
 
-    buildEmbedCopyMenuItem(selectedEmbed, embeds) {
+    buildEmbedCopyMenuItem(selectedEmbed, embeds, messageContext) {
         return {
             id: "embed-copy",
             label: "EmbedCopy",
@@ -252,7 +372,7 @@ module.exports = class EmbedCopy {
                 {
                     id: "embed-copy-raw",
                     label: "Copy Raw Embed",
-                    action: () => this.copyRawEmbed(selectedEmbed)
+                    action: () => this.copyRawEmbed(selectedEmbed, messageContext)
                 },
                 {
                     id: "embed-copy-carl",
@@ -262,7 +382,7 @@ module.exports = class EmbedCopy {
                 {
                     id: "embed-copy-discohook",
                     label: "Copy Discohook Embed",
-                    action: () => this.copyDiscohookEmbeds(embeds)
+                    action: () => this.copyDiscohookEmbeds(embeds, messageContext)
                 }
             ]
         };
@@ -334,7 +454,13 @@ module.exports = class EmbedCopy {
         return index >= 0 ? embeds[index] : null;
     }
 
-    copyRawEmbed(embed) {
+    copyRawEmbed(embed, messageContext) {
+        if (this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]) {
+            const payload = this.buildRawMessagePayload(embed, messageContext);
+            this.copyJson(payload, "Copied raw embed context.");
+            return;
+        }
+
         this.copyJson(embed, "Copied raw embed.");
     }
 
@@ -350,18 +476,171 @@ module.exports = class EmbedCopy {
         this.copyJson(payload, "Copied Carl embed JSON.");
     }
 
-    copyDiscohookEmbeds(embeds) {
+    copyDiscohookEmbeds(embeds, messageContext) {
         const payload = {
             embeds: embeds.map(embed => this.normalizeEmbed(embed, {
                 keepReadOnlyMediaData: false,
                 includeType: false,
                 includeProvider: true,
                 includeVideo: true,
-                includeFlags: true
+                includeFlags: true,
+                attachments: messageContext?.attachments
             })).filter(embed => Object.keys(embed).length)
         };
 
+        if (this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]) {
+            this.applyDiscohookMessageContext(payload, messageContext);
+        }
+
         this.copyJson(payload, payload.embeds.length > 1 ? "Copied Discohook embeds JSON." : "Copied Discohook embed JSON.");
+    }
+
+    buildRawMessagePayload(selectedEmbed, messageContext) {
+        const message = messageContext?.message || {};
+        const payload = {
+            embed: selectedEmbed
+        };
+
+        const context = this.normalizeRawMessageContext(messageContext);
+        if (Object.keys(context).length) payload.message = context;
+
+        const embeds = this.toEmbedArray(messageContext?.embeds);
+        if (embeds.length > 1) payload.embeds = embeds;
+
+        const selectedIndex = embeds.indexOf(selectedEmbed);
+        if (selectedIndex >= 0) payload.selected_embed_index = selectedIndex;
+
+        if (!Object.keys(context).length && embeds.length <= 1) return selectedEmbed;
+
+        return payload;
+    }
+
+    normalizeRawMessageContext(messageContext) {
+        const context = {};
+        const message = messageContext?.message || {};
+        const author = this.normalizeWebhookProfile(messageContext);
+        const thread = this.settings[SETTING_INCLUDE_FORUM_THREAD]
+            ? this.normalizeThreadContext(messageContext)
+            : {};
+        const flags = this.normalizeWebhookMessageFlags(messageContext?.flags);
+        const attachments = this.normalizeAttachments(messageContext?.attachments);
+
+        this.assignIfPresent(context, "id", this.pickString(message, ["id"]));
+        this.assignIfPresent(context, "channel_id", this.pickString(message, ["channel_id", "channelId"]));
+        this.assignIfPresent(context, "guild_id", this.pickString(message, ["guild_id", "guildId"]));
+        this.assignIfPresent(context, "content", messageContext?.content);
+        this.assignObjectIfPresent(context, "author", author);
+        this.assignObjectIfPresent(context, "thread", thread);
+        if (flags !== null) context.flags = flags;
+        if (attachments.length) context.attachments = attachments;
+
+        return context;
+    }
+
+    applyDiscohookMessageContext(payload, messageContext) {
+        const profile = this.normalizeWebhookProfile(messageContext);
+        const thread = this.settings[SETTING_INCLUDE_FORUM_THREAD]
+            ? this.normalizeThreadContext(messageContext)
+            : {};
+        const flags = this.normalizeWebhookMessageFlags(messageContext?.flags);
+
+        this.assignIfPresent(payload, "content", messageContext?.content);
+        this.assignIfPresent(payload, "username", profile.name);
+        this.assignIfPresent(payload, "avatar_url", profile.avatar_url);
+        this.assignIfPresent(payload, "thread_name", thread.name);
+        if (this.settings[SETTING_DISCOHOOK_TARGET] !== DISCOHOOK_TARGET_ORG) {
+            this.assignIfPresent(payload, "thread_id", thread.id);
+        }
+        if (flags !== null) payload.flags = flags;
+    }
+
+    normalizeWebhookProfile(messageContext) {
+        const author = messageContext?.author || {};
+        const normalized = {};
+        const name = this.pickString(author, ["username", "globalName", "global_name", "displayName", "name"]);
+        const avatarUrl = this.resolveAuthorAvatarUrl(author);
+
+        this.assignIfPresent(normalized, "name", name);
+        this.assignIfPresent(normalized, "avatar_url", avatarUrl);
+
+        return normalized;
+    }
+
+    resolveAuthorAvatarUrl(author) {
+        if (!author || typeof author !== "object") return null;
+
+        const direct = this.pickString(author, ["avatar_url", "avatarURL", "avatarUrl", "avatar"]);
+        if (this.isUsableUrl(direct)) return direct;
+
+        try {
+            const getter = author.getAvatarURL || author.getAvatarUrl;
+            if (typeof getter === "function") {
+                const avatarUrl = getter.call(author);
+                if (this.isUsableUrl(avatarUrl)) return avatarUrl;
+            }
+        }
+        catch {}
+
+        return null;
+    }
+
+    normalizeThreadContext(messageContext) {
+        const message = messageContext?.message || {};
+        const channel = messageContext?.channel || {};
+        const thread = message?.thread || messageContext?.props?.thread || channel?.thread || {};
+        const normalized = {};
+        const channelIsThread = this.channelLooksLikeThread(channel);
+        const name = this.pickString(thread, ["name"])
+            || (channelIsThread ? this.pickString(channel, ["name", "rawName"]) : null);
+        const id = this.pickString(message, ["thread_id", "threadId"])
+            || this.pickString(thread, ["id"])
+            || (channelIsThread ? this.pickString(channel, ["id"]) : null);
+
+        this.assignIfPresent(normalized, "name", name);
+        this.assignIfPresent(normalized, "id", id);
+
+        return normalized;
+    }
+
+    channelLooksLikeThread(channel) {
+        if (!channel || typeof channel !== "object") return false;
+
+        try {
+            if (typeof channel.isThread === "function" && channel.isThread()) return true;
+        }
+        catch {}
+
+        const type = this.normalizeInteger(channel.type);
+        return Boolean(channel.threadMetadata || channel.parent_id || channel.parentId || [10, 11, 12].includes(type));
+    }
+
+    normalizeWebhookMessageFlags(flags) {
+        const value = this.normalizeInteger(flags);
+        if (value === null) return null;
+
+        const allowed = value & (MESSAGE_FLAG_SUPPRESS_EMBEDS | MESSAGE_FLAG_SUPPRESS_NOTIFICATIONS);
+        return allowed || null;
+    }
+
+    normalizeAttachments(attachments) {
+        return this.toArrayLike(attachments).map(attachment => {
+            const normalized = {};
+            const filename = this.pickString(attachment, ["filename", "name"]);
+            const url = this.pickUsableUrl([
+                this.pickString(attachment, ["url", "href", "src"]),
+                this.pickString(attachment, ["proxy_url", "proxyURL", "proxyUrl"])
+            ]);
+            const size = this.normalizeInteger(this.pickValue(attachment, ["size"]));
+            const contentType = this.pickString(attachment, ["content_type", "contentType"]);
+
+            this.assignIfPresent(normalized, "id", this.pickString(attachment, ["id"]));
+            this.assignIfPresent(normalized, "filename", filename);
+            this.assignIfPresent(normalized, "url", url);
+            if (size !== null) normalized.size = size;
+            this.assignIfPresent(normalized, "content_type", contentType);
+
+            return Object.keys(normalized).length ? normalized : null;
+        }).filter(Boolean);
     }
 
     normalizeEmbed(embed, options = {}) {
@@ -404,7 +683,11 @@ module.exports = class EmbedCopy {
 
         const normalized = {};
         const text = this.pickString(footer, ["text", "rawText"]);
-        const iconUrl = this.pickString(footer, ["icon_url", "iconURL", "iconUrl"]);
+        const iconUrl = this.resolveTemplateUrl(
+            this.pickString(footer, ["icon_url", "iconURL", "iconUrl"]),
+            this.pickString(footer, ["proxy_icon_url", "proxyIconURL", "proxyIconUrl"]),
+            options.attachments
+        );
         const proxyIconUrl = this.pickString(footer, ["proxy_icon_url", "proxyIconURL", "proxyIconUrl"]);
 
         this.assignIfPresent(normalized, "text", text);
@@ -418,8 +701,9 @@ module.exports = class EmbedCopy {
         if (!media || typeof media !== "object") return null;
 
         const normalized = {};
-        const url = this.pickString(media, ["url", "src", "href"]);
+        const rawUrl = this.pickString(media, ["url", "src", "href"]);
         const proxyUrl = this.pickString(media, ["proxy_url", "proxyURL", "proxyUrl"]);
+        const url = this.resolveTemplateUrl(rawUrl, proxyUrl, options.attachments);
         const contentType = this.pickString(media, ["content_type", "contentType"]);
         const placeholder = this.pickString(media, ["placeholder"]);
         const description = this.pickString(media, ["description", "alt", "altText"]);
@@ -444,6 +728,52 @@ module.exports = class EmbedCopy {
         return normalized;
     }
 
+    resolveTemplateUrl(url, proxyUrl, attachments = []) {
+        const attachmentUrl = this.resolveAttachmentUrl(url, attachments);
+        return this.pickUsableUrl([url, attachmentUrl, proxyUrl]);
+    }
+
+    resolveAttachmentUrl(url, attachments = []) {
+        if (typeof url !== "string" || !url.startsWith("attachment://")) return null;
+
+        const attachmentName = this.normalizeFileName(url.slice("attachment://".length));
+        if (!attachmentName) return null;
+
+        const attachment = this.toArrayLike(attachments).find(item => {
+            const fileName = this.normalizeFileName(this.pickString(item, ["filename", "name"]));
+            return fileName && fileName === attachmentName;
+        });
+        if (!attachment) return null;
+
+        return this.pickUsableUrl([
+            this.pickString(attachment, ["url", "href", "src"]),
+            this.pickString(attachment, ["proxy_url", "proxyURL", "proxyUrl"])
+        ]);
+    }
+
+    normalizeFileName(value) {
+        if (typeof value !== "string") return null;
+
+        try {
+            return decodeURIComponent(value).trim().toLowerCase();
+        }
+        catch {
+            return value.trim().toLowerCase();
+        }
+    }
+
+    pickUsableUrl(urls) {
+        for (const url of urls) {
+            if (this.isUsableUrl(url)) return url;
+        }
+
+        return null;
+    }
+
+    isUsableUrl(url) {
+        return typeof url === "string" && /^https?:\/\//i.test(url.trim());
+    }
+
     normalizeProvider(provider) {
         if (!provider || typeof provider !== "object") return null;
 
@@ -463,7 +793,11 @@ module.exports = class EmbedCopy {
         const normalized = {};
         const name = this.pickString(author, ["name", "rawName"]);
         const url = this.pickString(author, ["url"]);
-        const iconUrl = this.pickString(author, ["icon_url", "iconURL", "iconUrl"]);
+        const iconUrl = this.resolveTemplateUrl(
+            this.pickString(author, ["icon_url", "iconURL", "iconUrl"]),
+            this.pickString(author, ["proxy_icon_url", "proxyIconURL", "proxyIconUrl"]),
+            options.attachments
+        );
         const proxyIconUrl = this.pickString(author, ["proxy_icon_url", "proxyIconURL", "proxyIconUrl"]);
 
         this.assignIfPresent(normalized, "name", name);
