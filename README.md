@@ -1,6 +1,6 @@
 # BDPlugins
 
-Personal BetterDiscord plugins maintained in one repository.
+Vibe-coded personal BetterDiscord plugins.
 
 Repo layout:
 - BetterDiscord plugins live at the repository root as `*.plugin.js`
