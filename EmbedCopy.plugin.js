@@ -10,6 +10,7 @@
 "use strict";
 
 const PLUGIN_NAME = "EmbedCopy";
+const MENU_PATCH_DELAY_MS = 1500;
 
 module.exports = class EmbedCopy {
     constructor(meta) {
@@ -17,12 +18,13 @@ module.exports = class EmbedCopy {
         this.pluginName = this.meta.name || PLUGIN_NAME;
         this.version = this.meta.version || "1.0.0";
         this.unpatchMessageMenu = null;
+        this.patchTimer = null;
     }
 
     start() {
         try {
             this.showChangelogIfNeeded();
-            this.patchMessageMenu();
+            this.scheduleMessageMenuPatch();
         }
         catch (error) {
             this.reportError("Failed to start.", error);
@@ -31,6 +33,11 @@ module.exports = class EmbedCopy {
     }
 
     stop() {
+        if (this.patchTimer) {
+            clearTimeout(this.patchTimer);
+            this.patchTimer = null;
+        }
+
         try {
             this.unpatchMessageMenu?.();
         }
@@ -87,7 +94,24 @@ module.exports = class EmbedCopy {
         }
     }
 
+    scheduleMessageMenuPatch() {
+        if (this.patchTimer || this.unpatchMessageMenu) return;
+
+        this.patchTimer = setTimeout(() => {
+            this.patchTimer = null;
+
+            try {
+                this.patchMessageMenu();
+            }
+            catch (error) {
+                this.reportError("Failed to patch the message context menu.", error);
+            }
+        }, MENU_PATCH_DELAY_MS);
+    }
+
     patchMessageMenu() {
+        if (this.unpatchMessageMenu) return;
+
         const contextMenu = BdApi?.ContextMenu;
         if (!contextMenu?.patch || !contextMenu?.buildMenuChildren) {
             throw new Error("BdApi.ContextMenu is not available.");
