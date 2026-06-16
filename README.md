@@ -22,6 +22,12 @@ This is useful when you want to quickly jump to the start of a conversation with
 
 > Origin: `JumpToTop.plugin.js` is a rebuilt version from [Huderon's BetterDiscordPlugins](https://github.com/Huderon/BetterDiscordPlugins), kept here because the old plugin was crashing my Discord client.
 
+## EmbedCopy
+
+Adds an `EmbedCopy` submenu to message context menus when the message contains embeds.
+
+It can copy the selected or first embed as raw Discord JSON, Carl-bot `!cembed`/`!ecembed` JSON, or a Discohook-compatible webhook payload.
+
 ## Experiments
 
 Enables Discord's experiment UI and developer-only experiment access from BetterDiscord.
