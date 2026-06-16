@@ -361,7 +361,7 @@ module.exports = class EmbedCopy {
         const payload = {
             embeds: embeds.map(embed => this.normalizeEmbed(embed, {
                 keepReadOnlyMediaData: false,
-                includeType: true,
+                includeType: false,
                 includeProvider: true,
                 includeVideo: true,
                 includeFlags: true
