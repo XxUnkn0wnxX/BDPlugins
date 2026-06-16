@@ -104,14 +104,22 @@ module.exports = class EmbedCopy {
                 const menuGroup = this.findMessageActionGroup(menu);
                 if (!menuGroup) return menu;
 
-                if (menuGroup.some(item => this.nodeHasMenuId(item, "embed-copy"))) return menu;
-
+                const selectedEmbed = this.resolveSelectedEmbed(props, embeds) ?? embeds[0];
                 const buttonIndex = this.findMenuItemIndex(menuGroup, "copy-message");
+                const existingEmbedCopyIndex = this.findMenuItemIndex(menuGroup, "embed-copy");
+
+                if (existingEmbedCopyIndex >= 0) {
+                    if (buttonIndex >= 0) {
+                        this.rebuildEmbedCopyPlacement(menuGroup, contextMenu, selectedEmbed, embeds, existingEmbedCopyIndex);
+                    }
+
+                    return menu;
+                }
+
                 const fallbackIndex = this.findFallbackInsertIndex(menuGroup);
                 const insertIndex = buttonIndex >= 0
                     ? buttonIndex + 1
                     : fallbackIndex;
-                const selectedEmbed = this.resolveSelectedEmbed(props, embeds) ?? embeds[0];
                 const items = buttonIndex >= 0
                     ? [this.buildEmbedCopyMenuItem(selectedEmbed, embeds)]
                     : [
@@ -226,6 +234,21 @@ module.exports = class EmbedCopy {
         return group.findIndex(item => this.nodeHasMenuId(item, id));
     }
 
+    rebuildEmbedCopyPlacement(group, contextMenu, selectedEmbed, embeds, existingIndex) {
+        group.splice(existingIndex, 1);
+
+        const buttonIndex = this.findMenuItemIndex(group, "copy-message");
+        if (buttonIndex < 0) return;
+
+        group.splice(
+            buttonIndex + 1,
+            0,
+            contextMenu.buildMenuChildren([
+                this.buildEmbedCopyMenuItem(selectedEmbed, embeds)
+            ])
+        );
+    }
+
     buildEmbedCopyMenuItem(selectedEmbed, embeds) {
         return {
             id: "embed-copy",
@@ -252,7 +275,7 @@ module.exports = class EmbedCopy {
     }
 
     findGroupByChildId(node, id) {
-        const children = this.asArray(node?.props?.children);
+        const children = Array.isArray(node) ? node : this.asArray(node?.props?.children);
 
         if (children.some(child => this.menuIdMatches(child?.props?.id, id))) return children;
 
@@ -266,6 +289,7 @@ module.exports = class EmbedCopy {
 
     nodeHasMenuId(node, id) {
         if (!node || typeof node !== "object") return false;
+        if (Array.isArray(node)) return node.some(child => this.nodeHasMenuId(child, id));
         if (this.menuIdMatches(node?.props?.id, id)) return true;
 
         return this.asArray(node?.props?.children).some(child => this.nodeHasMenuId(child, id));
@@ -273,6 +297,14 @@ module.exports = class EmbedCopy {
 
     findFirstMenuId(node) {
         if (!node || typeof node !== "object") return null;
+        if (Array.isArray(node)) {
+            for (const child of node) {
+                const id = this.findFirstMenuId(child);
+                if (id) return id;
+            }
+
+            return null;
+        }
         if (typeof node?.props?.id === "string") return node.props.id;
 
         for (const child of this.asArray(node?.props?.children)) {
