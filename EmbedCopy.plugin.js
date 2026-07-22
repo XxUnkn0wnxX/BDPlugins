@@ -192,12 +192,30 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Discohook Components V2 compatibility",
+                    title: "Ephemeral and Components V2 support",
+                    type: "added",
+                    items: [
+                        "Added a native root-level copy menu across the full row of ephemeral application-command messages that Discord does not give a context menu.",
+                        "Added Raw and discohook.app copy actions for Components V2 messages while keeping Carl limited to classic embeds.",
+                        `Exposed the ${EPHEMERAL_MENU_NAV_ID} menu ID so other BetterDiscord plugins can add compatible actions.`
+                    ]
+                },
+                {
+                    title: "Complete message payloads",
+                    type: "improved",
+                    items: [
+                        "Raw message copies now include accompanying text and every classic embed in one payload.",
+                        "Discohook message copies now always include text that accompanies classic embeds while optional metadata remains setting-controlled.",
+                        "Preserved normal message-menu placement and kept plain-text-only messages excluded."
+                    ]
+                },
+                {
+                    title: "Discohook compatibility",
                     type: "fixed",
                     items: [
-                        "Converted Discord client component fields to the API casing required by discohook.app.",
-                        "Removed client-only component path IDs while preserving Text Displays, buttons, and nested layouts.",
-                        "Restricted Discohook Components copies to discohook.app; Raw Components copies remain unchanged."
+                        "Converted Components V2 client fields to API snake_case and removed client-only component path IDs.",
+                        "Preserved Text Displays, buttons, and nested layouts for the discohook.app JSON editor.",
+                        "Restricted Components V2 export to discohook.app; discohook.org remains legacy embed-only."
                     ]
                 }
             ]
