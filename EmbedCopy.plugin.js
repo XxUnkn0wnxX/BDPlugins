@@ -92,9 +92,9 @@ module.exports = class EmbedCopy {
                     note: BdApi.React.createElement(
                         BdApi.React.Fragment,
                         null,
-                        BdApi.React.createElement("span", {style: {color: "var(--status-danger)"}}, "Off"),
+                        BdApi.React.createElement("strong", {style: {color: "var(--status-danger)"}}, "Off"),
                         ": ignores components. ",
-                        BdApi.React.createElement("span", {style: {color: "var(--status-positive)"}}, "On"),
+                        BdApi.React.createElement("strong", {style: {color: "var(--status-positive)"}}, "On"),
                         ": enables component copies and component-only menus."
                     ),
                     value: this.settings[SETTING_MESSAGE_COMPONENTS]
