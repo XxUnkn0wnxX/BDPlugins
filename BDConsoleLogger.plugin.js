@@ -1,7 +1,8 @@
 /**
  * @name BDConsoleLogger
  * @author openAI
- * @version 1.0.0
+ * @authorId 361510310504562699
+ * @version 1.0.1
  * @description Writes live renderer console output to BetterDiscord's channel-specific console.log file beside debug.log.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/BDConsoleLogger.plugin.js

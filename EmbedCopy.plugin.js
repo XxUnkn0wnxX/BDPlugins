@@ -1,7 +1,8 @@
 /**
  * @name EmbedCopy
  * @author openAI
- * @version 1.0.3
+ * @authorId 361510310504562699
+ * @version 1.0.4
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
