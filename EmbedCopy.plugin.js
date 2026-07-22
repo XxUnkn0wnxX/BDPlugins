@@ -2,8 +2,8 @@
  * @name EmbedCopy
  * @author openAI
  * @authorId 361510310504562699
- * @version 1.0.6
- * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
+ * @version 1.0.7
+ * @description Adds message and embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
  */
@@ -34,7 +34,7 @@ module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.6";
+        this.version = this.meta.version || "1.0.7";
         this.unpatchMessageMenu = null;
         this.ephemeralEmbedMenuPatched = false;
         this.onEphemeralEmbedContextMenu = event => this.handleEphemeralEmbedContextMenu(event);
@@ -79,8 +79,8 @@ module.exports = class EmbedCopy {
                         {
                             type: "switch",
                             id: SETTING_INCLUDE_MESSAGE_CONTEXT,
-                            name: "Include message context",
-                            note: "Message body fields: content, author, username, avatar_url, id, channel_id, guild_id, attachments.",
+                            name: "Include message metadata",
+                            note: "Raw adds IDs, author, and attachments. Discohook adds username and avatar. Accompanying message text is always copied.",
                             value: this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT]
                         },
                         {
@@ -178,12 +178,12 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Components and ephemeral messages",
-                    type: "added",
+                    title: "Complete message payloads",
+                    type: "improved",
                     items: [
-                        "Added Raw and Discohook copy actions for Discord Components V2 messages while keeping Carl copies embed-only.",
-                        "Expanded the synthetic ephemeral menu trigger to the entire message row.",
-                        `Preserved normal message-menu placement and the injectable ${EPHEMERAL_MENU_NAV_ID} synthetic menu ID.`
+                        "Raw copies now export one message payload containing accompanying text and every classic embed.",
+                        "Discohook copies now always include text that accompanies classic embeds.",
+                        "Plain-text-only messages remain excluded, and Carl copies remain selected-embed only."
                     ]
                 }
             ]
@@ -548,8 +548,8 @@ module.exports = class EmbedCopy {
             items.push(
                 {
                     id: "embed-copy-raw",
-                    label: "Copy Raw Embed",
-                    action: () => this.copyRawEmbed(selectedEmbed, messageContext)
+                    label: "Copy Raw Message",
+                    action: () => this.copyRawMessage(messageContext)
                 },
                 {
                     id: "embed-copy-carl",
@@ -558,7 +558,7 @@ module.exports = class EmbedCopy {
                 },
                 {
                     id: "embed-copy-discohook",
-                    label: "Copy Discohook Embed",
+                    label: "Copy Discohook Message",
                     action: () => this.copyDiscohookEmbeds(embeds, messageContext)
                 }
             );
@@ -655,9 +655,8 @@ module.exports = class EmbedCopy {
         return index >= 0 ? embeds[index] : null;
     }
 
-    copyRawEmbed(embed, messageContext) {
-        const payload = this.buildRawMessagePayload(embed, messageContext);
-        this.copyJson(payload, payload === embed ? "Copied raw embed." : "Copied raw embed context.");
+    copyRawMessage(messageContext) {
+        this.copyJson(this.buildRawMessagePayload(messageContext), "Copied raw message JSON.");
     }
 
     copyCarlEmbed(embed) {
@@ -684,29 +683,16 @@ module.exports = class EmbedCopy {
             })).filter(embed => Object.keys(embed).length)
         };
 
-        if (this.shouldCopyDiscohookMessageContext()) {
-            this.applyDiscohookMessageContext(payload, messageContext);
-        }
+        this.applyDiscohookMessageContext(payload, messageContext);
 
-        this.copyJson(payload, payload.embeds.length > 1 ? "Copied Discohook embeds JSON." : "Copied Discohook embed JSON.");
+        this.copyJson(payload, "Copied Discohook message JSON.");
     }
 
-    buildRawMessagePayload(selectedEmbed, messageContext) {
-        const exposeAll = this.settings[SETTING_RAW_EXPOSE_ALL];
-        const payload = {
-            embed: selectedEmbed
-        };
-
-        const context = this.normalizeRawMessageContext(messageContext);
-        if (Object.keys(context).length) payload.message = context;
-
+    buildRawMessagePayload(messageContext) {
+        const payload = this.normalizeRawMessageContext(messageContext);
         const embeds = this.toEmbedArray(messageContext?.embeds);
-        if (exposeAll && embeds.length > 1) payload.embeds = embeds;
-
-        const selectedIndex = embeds.indexOf(selectedEmbed);
-        if (exposeAll && selectedIndex >= 0) payload.selected_embed_index = selectedIndex;
-
-        if (!Object.keys(context).length && (!exposeAll || embeds.length <= 1)) return selectedEmbed;
+        this.assignIfPresent(payload, "content", messageContext?.content);
+        if (embeds.length) payload.embeds = embeds;
 
         return payload;
     }
@@ -726,7 +712,6 @@ module.exports = class EmbedCopy {
             this.assignIfPresent(context, "id", this.pickString(message, ["id"]));
             this.assignIfPresent(context, "channel_id", this.pickString(message, ["channel_id", "channelId"]));
             this.assignIfPresent(context, "guild_id", this.pickString(message, ["guild_id", "guildId"]));
-            this.assignIfPresent(context, "content", messageContext?.content);
             this.assignObjectIfPresent(context, "author", author);
             if (attachments.length) context.attachments = attachments;
         }
@@ -745,8 +730,9 @@ module.exports = class EmbedCopy {
             ? this.normalizeThreadContext(messageContext)
             : {};
 
+        if (includeContent) this.assignIfPresent(payload, "content", messageContext?.content);
+
         if (includeMessageContext) {
-            if (includeContent) this.assignIfPresent(payload, "content", messageContext?.content);
             this.assignIfPresent(payload, "username", profile.name);
             this.assignIfPresent(payload, "avatar_url", profile.avatar_url);
         }
