@@ -89,7 +89,14 @@ module.exports = class EmbedCopy {
                     type: "switch",
                     id: SETTING_MESSAGE_COMPONENTS,
                     name: "Enable message components",
-                    note: "Off: classic embed copies exclude components and component-only messages are ignored. On: Raw includes components, discohook.app can export them, and component-only messages show EmbedCopy. Carl and discohook.org do not support components.",
+                    note: BdApi.React.createElement(
+                        BdApi.React.Fragment,
+                        null,
+                        BdApi.React.createElement("span", {style: {color: "var(--status-danger)"}}, "Off"),
+                        ": ignores components. ",
+                        BdApi.React.createElement("span", {style: {color: "var(--status-positive)"}}, "On"),
+                        ": enables component copies and component-only menus."
+                    ),
                     value: this.settings[SETTING_MESSAGE_COMPONENTS]
                 },
                 {
