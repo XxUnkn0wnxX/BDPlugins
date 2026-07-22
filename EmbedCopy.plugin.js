@@ -2,7 +2,7 @@
  * @name EmbedCopy
  * @author openAI
  * @authorId 361510310504562699
- * @version 1.0.7
+ * @version 1.0.8
  * @description Adds message and embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -23,6 +23,20 @@ const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
 const SETTING_DISCOHOOK_TARGET = "discohookTarget";
 const DISCOHOOK_TARGET_APP = "app";
 const DISCOHOOK_TARGET_ORG = "org";
+const DISCOHOOK_COMPONENT_KEY_MAP = {
+    customId: "custom_id",
+    skuId: "sku_id",
+    accentColor: "accent_color",
+    proxyUrl: "proxy_url",
+    contentType: "content_type",
+    defaultValues: "default_values",
+    minValues: "min_values",
+    maxValues: "max_values",
+    channelTypes: "channel_types",
+    minLength: "min_length",
+    maxLength: "max_length",
+    placeholderVersion: "placeholder_version"
+};
 const DEFAULT_SETTINGS = {
     [SETTING_RAW_EXPOSE_ALL]: false,
     [SETTING_INCLUDE_MESSAGE_CONTEXT]: false,
@@ -34,7 +48,7 @@ module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.7";
+        this.version = this.meta.version || "1.0.8";
         this.unpatchMessageMenu = null;
         this.ephemeralEmbedMenuPatched = false;
         this.onEphemeralEmbedContextMenu = event => this.handleEphemeralEmbedContextMenu(event);
@@ -100,12 +114,12 @@ module.exports = class EmbedCopy {
                                 {
                                     name: "discohook.app",
                                     value: DISCOHOOK_TARGET_APP,
-                                    desc: "Includes Thread ID when forum thread fields are enabled."
+                                    desc: "Supports Components V2 and includes Thread ID when forum thread fields are enabled."
                                 },
                                 {
                                     name: "discohook.org",
                                     value: DISCOHOOK_TARGET_ORG,
-                                    desc: "Omits Thread ID for legacy import compatibility."
+                                    desc: "Legacy embed-only export. Omits Thread ID and disables Components V2 copies."
                                 }
                             ]
                         }
@@ -178,12 +192,12 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Complete message payloads",
-                    type: "improved",
+                    title: "Discohook Components V2 compatibility",
+                    type: "fixed",
                     items: [
-                        "Raw copies now export one message payload containing accompanying text and every classic embed.",
-                        "Discohook copies now always include text that accompanies classic embeds.",
-                        "Plain-text-only messages remain excluded, and Carl copies remain selected-embed only."
+                        "Converted Discord client component fields to the API casing required by discohook.app.",
+                        "Removed client-only component path IDs while preserving Text Displays, buttons, and nested layouts.",
+                        "Restricted Discohook Components copies to discohook.app; Raw Components copies remain unchanged."
                     ]
                 }
             ]
@@ -567,18 +581,19 @@ module.exports = class EmbedCopy {
         if (this.isComponentsV2Message(messageContext)) {
             if (items.length) items.push({type: "separator"});
 
-            items.push(
-                {
-                    id: "embed-copy-components-raw",
-                    label: "Copy Raw Components",
-                    action: () => this.copyRawComponents(messageContext)
-                },
-                {
+            items.push({
+                id: "embed-copy-components-raw",
+                label: "Copy Raw Components",
+                action: () => this.copyRawComponents(messageContext)
+            });
+
+            if (this.supportsDiscohookComponents()) {
+                items.push({
                     id: "embed-copy-components-discohook",
                     label: "Copy Discohook Components",
                     action: () => this.copyDiscohookComponents(messageContext)
-                }
-            );
+                });
+            }
         }
 
         return {
@@ -758,9 +773,14 @@ module.exports = class EmbedCopy {
     }
 
     copyDiscohookComponents(messageContext) {
+        if (!this.supportsDiscohookComponents()) {
+            this.showToast("Components V2 copies require the discohook.app target.", "warning");
+            return;
+        }
+
         const payload = {
             flags: COMPONENTS_V2_MESSAGE_FLAG,
-            components: this.normalizeComponents(messageContext?.components)
+            components: this.normalizeDiscohookComponents(messageContext?.components)
         };
 
         if (this.shouldCopyDiscohookMessageContext()) {
@@ -786,6 +806,61 @@ module.exports = class EmbedCopy {
                 return null;
             }
         }).filter(component => component && typeof component === "object");
+    }
+
+    normalizeDiscohookComponents(components) {
+        return this.normalizeComponents(components)
+            .map(component => this.normalizeDiscohookComponent(component))
+            .filter(Boolean);
+    }
+
+    normalizeDiscohookComponent(component) {
+        if (!component || typeof component !== "object" || Array.isArray(component)) return null;
+
+        const normalized = {};
+
+        for (const [key, value] of Object.entries(component)) {
+            if (key === "id") continue;
+
+            const normalizedKey = this.normalizeDiscohookComponentKey(key);
+            if (normalizedKey === "components") {
+                normalized.components = this.toArrayLike(value)
+                    .map(child => this.normalizeDiscohookComponent(child))
+                    .filter(Boolean);
+                continue;
+            }
+
+            if (normalizedKey === "accessory") {
+                const accessory = this.normalizeDiscohookComponent(value);
+                if (accessory) normalized.accessory = accessory;
+                continue;
+            }
+
+            normalized[normalizedKey] = this.normalizeDiscohookValue(value);
+        }
+
+        return normalized;
+    }
+
+    normalizeDiscohookValue(value) {
+        if (Array.isArray(value)) return value.map(item => this.normalizeDiscohookValue(item));
+        if (!value || typeof value !== "object") return value;
+
+        const normalized = {};
+        for (const [key, child] of Object.entries(value)) {
+            normalized[this.normalizeDiscohookComponentKey(key)] = this.normalizeDiscohookValue(child);
+        }
+
+        return normalized;
+    }
+
+    normalizeDiscohookComponentKey(key) {
+        return DISCOHOOK_COMPONENT_KEY_MAP[key]
+            || key.replace(/[A-Z]/g, character => `_${character.toLowerCase()}`);
+    }
+
+    supportsDiscohookComponents() {
+        return this.settings[SETTING_DISCOHOOK_TARGET] === DISCOHOOK_TARGET_APP;
     }
 
     shouldCopyDiscohookMessageContext() {
