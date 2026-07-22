@@ -18,7 +18,7 @@ const EMBED_ELEMENT_SELECTOR = "article[class*='embed']";
 const MESSAGE_ELEMENT_SELECTOR = "[id^='chat-messages-'], [class*='messageListItem']";
 const EPHEMERAL_MESSAGE_SELECTOR = "[role='article'][class*='ephemeral']";
 const SETTING_RAW_EXPOSE_ALL = "rawExposeAll";
-const SETTING_COMPONENT_ONLY_MESSAGES = "componentOnlyMessages";
+const SETTING_MESSAGE_COMPONENTS = "messageComponents";
 const SETTING_INCLUDE_MESSAGE_CONTEXT = "includeMessageContext";
 const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
 const SETTING_DISCOHOOK_TARGET = "discohookTarget";
@@ -40,7 +40,7 @@ const DISCOHOOK_COMPONENT_KEY_MAP = {
 };
 const DEFAULT_SETTINGS = {
     [SETTING_RAW_EXPOSE_ALL]: false,
-    [SETTING_COMPONENT_ONLY_MESSAGES]: false,
+    [SETTING_MESSAGE_COMPONENTS]: false,
     [SETTING_INCLUDE_MESSAGE_CONTEXT]: false,
     [SETTING_INCLUDE_FORUM_THREAD]: false,
     [SETTING_DISCOHOOK_TARGET]: DISCOHOOK_TARGET_APP
@@ -82,15 +82,15 @@ module.exports = class EmbedCopy {
                     type: "switch",
                     id: SETTING_RAW_EXPOSE_ALL,
                     name: "Raw Expose All",
-                    note: "Raw copies all captured message data, including flags, without filters.",
+                    note: "Raw adds all captured message metadata, including flags, without filters. Message components still require Enable message components.",
                     value: this.settings[SETTING_RAW_EXPOSE_ALL]
                 },
                 {
                     type: "switch",
-                    id: SETTING_COMPONENT_ONLY_MESSAGES,
-                    name: "Show component-only messages",
-                    note: "Shows EmbedCopy when a message has components but no classic embeds. Components attached to classic embeds are always included in Raw and are included in Discohook only for discohook.app; Carl and discohook.org do not support components.",
-                    value: this.settings[SETTING_COMPONENT_ONLY_MESSAGES]
+                    id: SETTING_MESSAGE_COMPONENTS,
+                    name: "Enable message components",
+                    note: "Off: classic embed copies exclude components and component-only messages are ignored. On: Raw includes components, discohook.app can export them, and component-only messages show EmbedCopy. Carl and discohook.org do not support components.",
+                    value: this.settings[SETTING_MESSAGE_COMPONENTS]
                 },
                 {
                     type: "category",
@@ -204,9 +204,9 @@ module.exports = class EmbedCopy {
                     title: "Complete message component support",
                     type: "added",
                     items: [
-                        "Added legacy action-row, button, and select components to Raw and discohook.app payloads for classic embed messages.",
-                        "Added a default-off setting that controls whether component-only messages receive an EmbedCopy menu.",
-                        "Limited component-bearing message actions to Raw and discohook.app because Carl and discohook.org cannot preserve components."
+                        "Added legacy action-row, button, and select components to Raw and discohook.app payloads.",
+                        "Added a default-off setting that gates component copying and component-only message menus.",
+                        "Kept classic embed behavior unchanged while the setting is off and limited enabled component exports to Raw and discohook.app."
                     ]
                 }
             ]
@@ -403,11 +403,15 @@ module.exports = class EmbedCopy {
         return Boolean(messageContext?.components?.length);
     }
 
-    shouldShowComponentOnlyMessage(messageContext) {
+    shouldCopyMessageComponents(messageContext) {
         return Boolean(
-            this.settings[SETTING_COMPONENT_ONLY_MESSAGES]
+            this.settings[SETTING_MESSAGE_COMPONENTS]
             && this.hasMessageComponents(messageContext)
         );
+    }
+
+    shouldShowComponentOnlyMessage(messageContext) {
+        return this.shouldCopyMessageComponents(messageContext);
     }
 
     openEphemeralEmbedMenu(event, {selectedEmbed, embeds, messageContext}) {
@@ -577,7 +581,7 @@ module.exports = class EmbedCopy {
 
     buildEmbedCopyMenuItem(selectedEmbed, embeds, messageContext) {
         const items = [];
-        const hasComponents = this.hasMessageComponents(messageContext);
+        const hasComponents = this.shouldCopyMessageComponents(messageContext);
 
         if (selectedEmbed) {
             items.push({
@@ -710,7 +714,9 @@ module.exports = class EmbedCopy {
     }
 
     copyDiscohookEmbeds(embeds, messageContext) {
-        const components = this.toArrayLike(messageContext?.components);
+        const components = this.shouldCopyMessageComponents(messageContext)
+            ? this.toArrayLike(messageContext?.components)
+            : [];
         if (components.length && !this.supportsDiscohookComponents()) {
             this.showToast("Message component copies require the discohook.app target.", "warning");
             return;
@@ -737,7 +743,9 @@ module.exports = class EmbedCopy {
     buildRawMessagePayload(messageContext) {
         const payload = this.normalizeRawMessageContext(messageContext);
         const embeds = this.toEmbedArray(messageContext?.embeds);
-        const components = this.toArrayLike(messageContext?.components);
+        const components = this.shouldCopyMessageComponents(messageContext)
+            ? this.toArrayLike(messageContext?.components)
+            : [];
         this.assignIfPresent(payload, "content", messageContext?.content);
         if (embeds.length) payload.embeds = embeds;
         if (components.length) payload.components = this.normalizeComponents(components);
@@ -792,6 +800,11 @@ module.exports = class EmbedCopy {
     }
 
     copyRawComponents(messageContext) {
+        if (!this.shouldCopyMessageComponents(messageContext)) {
+            this.showToast("Enable message components in EmbedCopy settings first.", "warning");
+            return;
+        }
+
         const components = this.normalizeComponents(messageContext?.components);
         const payload = {
             ...this.normalizeRawMessageContext(messageContext),
@@ -811,6 +824,11 @@ module.exports = class EmbedCopy {
     }
 
     copyDiscohookComponents(messageContext) {
+        if (!this.shouldCopyMessageComponents(messageContext)) {
+            this.showToast("Enable message components in EmbedCopy settings first.", "warning");
+            return;
+        }
+
         if (!this.supportsDiscohookComponents()) {
             this.showToast("Components V2 copies require the discohook.app target.", "warning");
             return;
