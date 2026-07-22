@@ -2,7 +2,7 @@
  * @name EmbedCopy
  * @author openAI
  * @authorId 361510310504562699
- * @version 1.0.4
+ * @version 1.0.5
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -11,6 +11,10 @@
 "use strict";
 
 const PLUGIN_NAME = "EmbedCopy";
+const EPHEMERAL_MESSAGE_FLAG = 64;
+const EPHEMERAL_MENU_NAV_ID = "embed-copy-ephemeral";
+const EMBED_ELEMENT_SELECTOR = "article[class*='embed']";
+const MESSAGE_ELEMENT_SELECTOR = "[id^='chat-messages-'], [class*='messageListItem']";
 const SETTING_RAW_EXPOSE_ALL = "rawExposeAll";
 const SETTING_INCLUDE_MESSAGE_CONTEXT = "includeMessageContext";
 const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
@@ -28,8 +32,10 @@ module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.3";
+        this.version = this.meta.version || "1.0.5";
         this.unpatchMessageMenu = null;
+        this.ephemeralEmbedMenuPatched = false;
+        this.onEphemeralEmbedContextMenu = event => this.handleEphemeralEmbedContextMenu(event);
         this.settings = {...DEFAULT_SETTINGS};
     }
 
@@ -38,6 +44,7 @@ module.exports = class EmbedCopy {
             this.settings = this.loadSettings();
             this.showChangelogIfNeeded();
             this.patchMessageMenu();
+            this.patchEphemeralEmbedMenu();
         }
         catch (error) {
             this.reportError("Failed to start.", error);
@@ -142,6 +149,13 @@ module.exports = class EmbedCopy {
 
     stop() {
         try {
+            this.unpatchEphemeralEmbedMenu();
+        }
+        catch (error) {
+            this.reportError("Failed to remove the ephemeral embed context menu listener.", error);
+        }
+
+        try {
             this.unpatchMessageMenu?.();
         }
         catch (error) {
@@ -162,12 +176,12 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Summary",
-                    type: "progress",
+                    title: "Ephemeral embeds",
+                    type: "added",
                     items: [
-                        "Added optional message and forum thread context settings for Raw and Discohook copies.",
-                        "Added Raw Expose All for full raw message dumps.",
-                        "Grouped Discohook options and omitted suppress flag output from converted templates."
+                        "Added a native copy menu for ephemeral application-command embeds that Discord does not give a message context menu.",
+                        "Shows Raw, Carl, and Discohook copy actions directly at the menu root.",
+                        `Exposes the ${EPHEMERAL_MENU_NAV_ID} menu ID so other BetterDiscord plugins can add compatible actions.`
                     ]
                 }
             ]
@@ -235,6 +249,128 @@ module.exports = class EmbedCopy {
 
             return menu;
         });
+    }
+
+    patchEphemeralEmbedMenu() {
+        if (this.ephemeralEmbedMenuPatched) return;
+        if (!globalThis.document?.addEventListener) {
+            throw new Error("Document context-menu events are not available.");
+        }
+
+        document.addEventListener("contextmenu", this.onEphemeralEmbedContextMenu, true);
+        this.ephemeralEmbedMenuPatched = true;
+    }
+
+    unpatchEphemeralEmbedMenu() {
+        if (!this.ephemeralEmbedMenuPatched) return;
+
+        globalThis.document?.removeEventListener?.("contextmenu", this.onEphemeralEmbedContextMenu, true);
+        this.ephemeralEmbedMenuPatched = false;
+    }
+
+    handleEphemeralEmbedContextMenu(event) {
+        try {
+            const target = event?.target instanceof Element ? event.target : null;
+            if (!target) return;
+
+            const embedContext = this.getEphemeralEmbedContext(target);
+            if (!embedContext) return;
+
+            event.preventDefault();
+            this.openEphemeralEmbedMenu(event, embedContext);
+        }
+        catch (error) {
+            this.reportError("Failed to open an ephemeral embed context menu.", error);
+        }
+    }
+
+    getEphemeralEmbedContext(target) {
+        const embedElement = target.closest(EMBED_ELEMENT_SELECTOR);
+        if (!embedElement || embedElement.closest("[role='menu']")) return null;
+
+        const reactContext = this.getReactMessageContext(embedElement);
+        const identity = this.getMessageIdentity(embedElement);
+        const props = {
+            ...(reactContext?.props || {}),
+            target,
+            rawTarget: target
+        };
+        let message = reactContext?.message;
+
+        if (!message && identity) {
+            message = {
+                id: identity.messageId,
+                channel_id: identity.channelId
+            };
+            props.channel = props.channel || {id: identity.channelId};
+        }
+
+        if (!message) return null;
+
+        const messageContext = this.getMessageContext(message, props);
+        const embeds = messageContext.embeds;
+        if (!embeds.length || !this.isEphemeralMessage(messageContext, embedElement)) return null;
+
+        return {
+            embeds,
+            messageContext,
+            selectedEmbed: this.resolveSelectedEmbed(props, embeds) ?? embeds[0]
+        };
+    }
+
+    getReactMessageContext(element) {
+        let fiber = BdApi?.ReactUtils?.getInternalInstance?.(element);
+        const visited = new Set();
+
+        for (let depth = 0; fiber && depth < 100 && !visited.has(fiber); depth++, fiber = fiber.return) {
+            visited.add(fiber);
+
+            for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
+                const message = props?.message;
+                if (!message || typeof message !== "object") continue;
+                if (!message.id && !message.embeds) continue;
+
+                return {message, props};
+            }
+        }
+
+        return null;
+    }
+
+    getMessageIdentity(element) {
+        const messageElement = element.closest(MESSAGE_ELEMENT_SELECTOR);
+        const match = messageElement?.id?.match(/^chat-messages-(\d+)-(\d+)$/);
+        if (!match) return null;
+
+        return {
+            channelId: match[1],
+            messageId: match[2]
+        };
+    }
+
+    isEphemeralMessage(messageContext, embedElement) {
+        const flags = this.normalizeInteger(messageContext?.flags);
+        if (flags !== null && (flags & EPHEMERAL_MESSAGE_FLAG) === EPHEMERAL_MESSAGE_FLAG) return true;
+
+        return Boolean(embedElement.closest("[class*='ephemeral']"));
+    }
+
+    openEphemeralEmbedMenu(event, {selectedEmbed, embeds, messageContext}) {
+        const contextMenu = BdApi?.ContextMenu;
+        const react = BdApi?.React;
+        if (!contextMenu?.open || !contextMenu?.buildMenuChildren || !contextMenu?.Menu || !react?.createElement) {
+            throw new Error("Native BetterDiscord context-menu components are not available.");
+        }
+
+        const menuItems = this.buildEmbedCopyMenuItem(selectedEmbed, embeds, messageContext).items;
+        const menuChildren = contextMenu.buildMenuChildren(menuItems);
+        const menuComponent = props => react.createElement(
+            contextMenu.Menu,
+            {...props, navId: EPHEMERAL_MENU_NAV_ID},
+            menuChildren
+        );
+
+        contextMenu.open(event, menuComponent);
     }
 
     getMessageContext(message, props = {}) {
@@ -455,18 +591,18 @@ module.exports = class EmbedCopy {
     }
 
     resolveSelectedEmbed(props, embeds) {
-        const target = props?.target instanceof HTMLElement
+        const target = props?.target instanceof Element
             ? props.target
-            : props?.rawTarget instanceof HTMLElement
+            : props?.rawTarget instanceof Element
                 ? props.rawTarget
                 : null;
         if (!target) return null;
 
-        const embedElement = target.closest("[class*='embed']");
-        const messageElement = target.closest("[id^='chat-messages-'], [class*='message']");
+        const embedElement = target.closest(EMBED_ELEMENT_SELECTOR);
+        const messageElement = target.closest(MESSAGE_ELEMENT_SELECTOR);
         if (!embedElement || !messageElement) return null;
 
-        const embedElements = Array.from(messageElement.querySelectorAll("[class*='embed']")).filter(element => {
+        const embedElements = Array.from(messageElement.querySelectorAll(EMBED_ELEMENT_SELECTOR)).filter(element => {
             return element instanceof HTMLElement && !element.closest("[role='menu']");
         });
         const index = embedElements.indexOf(embedElement);
