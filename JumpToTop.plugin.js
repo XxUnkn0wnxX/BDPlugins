@@ -1,8 +1,8 @@
 /**
  * @name JumpToTop
- * @author openAI
+ * @author XxUnkn0wnxX (AI)
  * @authorId 361510310504562699
- * @version 2.0.2
+ * @version 2.0.3
  * @description Adds a channel header button that jumps to the first message in the current channel.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/JumpToTop.plugin.js

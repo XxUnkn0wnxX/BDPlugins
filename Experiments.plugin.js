@@ -1,8 +1,8 @@
 /**
  * @name Experiments
- * @author openAI
+ * @author XxUnkn0wnxX (AI)
  * @authorId 361510310504562699
- * @version 1.6.1
+ * @version 1.6.2
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
