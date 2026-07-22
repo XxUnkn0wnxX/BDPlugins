@@ -2,7 +2,7 @@
  * @name EmbedCopy
  * @author openAI
  * @authorId 361510310504562699
- * @version 1.0.5
+ * @version 1.0.6
  * @description Adds message embed copy actions for raw Discord, Carl-bot, and Discohook JSON formats.
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
  * @updateUrl https://raw.githubusercontent.com/XxUnkn0wnxX/BDPlugins/main/EmbedCopy.plugin.js
@@ -12,9 +12,11 @@
 
 const PLUGIN_NAME = "EmbedCopy";
 const EPHEMERAL_MESSAGE_FLAG = 64;
+const COMPONENTS_V2_MESSAGE_FLAG = 1 << 15;
 const EPHEMERAL_MENU_NAV_ID = "embed-copy-ephemeral";
 const EMBED_ELEMENT_SELECTOR = "article[class*='embed']";
 const MESSAGE_ELEMENT_SELECTOR = "[id^='chat-messages-'], [class*='messageListItem']";
+const EPHEMERAL_MESSAGE_SELECTOR = "[role='article'][class*='ephemeral']";
 const SETTING_RAW_EXPOSE_ALL = "rawExposeAll";
 const SETTING_INCLUDE_MESSAGE_CONTEXT = "includeMessageContext";
 const SETTING_INCLUDE_FORUM_THREAD = "includeForumThread";
@@ -32,7 +34,7 @@ module.exports = class EmbedCopy {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.0.5";
+        this.version = this.meta.version || "1.0.6";
         this.unpatchMessageMenu = null;
         this.ephemeralEmbedMenuPatched = false;
         this.onEphemeralEmbedContextMenu = event => this.handleEphemeralEmbedContextMenu(event);
@@ -176,12 +178,12 @@ module.exports = class EmbedCopy {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Ephemeral embeds",
+                    title: "Components and ephemeral messages",
                     type: "added",
                     items: [
-                        "Added a native copy menu for ephemeral application-command embeds that Discord does not give a message context menu.",
-                        "Shows Raw, Carl, and Discohook copy actions directly at the menu root.",
-                        `Exposes the ${EPHEMERAL_MENU_NAV_ID} menu ID so other BetterDiscord plugins can add compatible actions.`
+                        "Added Raw and Discohook copy actions for Discord Components V2 messages while keeping Carl copies embed-only.",
+                        "Expanded the synthetic ephemeral menu trigger to the entire message row.",
+                        `Preserved normal message-menu placement and the injectable ${EPHEMERAL_MENU_NAV_ID} synthetic menu ID.`
                     ]
                 }
             ]
@@ -216,12 +218,14 @@ module.exports = class EmbedCopy {
             try {
                 const messageContext = this.getMessageContext(props?.message, props);
                 const embeds = messageContext.embeds;
-                if (!embeds.length) return menu;
+                if (!embeds.length && !this.isComponentsV2Message(messageContext)) return menu;
 
                 const menuGroup = this.findMessageActionGroup(menu);
                 if (!menuGroup) return menu;
 
-                const selectedEmbed = this.resolveSelectedEmbed(props, embeds) ?? embeds[0];
+                const selectedEmbed = embeds.length
+                    ? this.resolveSelectedEmbed(props, embeds) ?? embeds[0]
+                    : null;
                 const buttonIndex = this.findMenuItemIndex(menuGroup, "copy-message");
                 const existingEmbedCopyIndex = this.findMenuItemIndex(menuGroup, "embed-copy");
 
@@ -285,11 +289,16 @@ module.exports = class EmbedCopy {
     }
 
     getEphemeralEmbedContext(target) {
-        const embedElement = target.closest(EMBED_ELEMENT_SELECTOR);
-        if (!embedElement || embedElement.closest("[role='menu']")) return null;
+        const messageElement = target.closest(EPHEMERAL_MESSAGE_SELECTOR);
+        if (!messageElement || messageElement.closest("[role='menu']")) return null;
 
-        const reactContext = this.getReactMessageContext(embedElement);
-        const identity = this.getMessageIdentity(embedElement);
+        const clickedEmbedElement = target.closest(EMBED_ELEMENT_SELECTOR);
+        const embedElement = clickedEmbedElement && messageElement.contains(clickedEmbedElement)
+            ? clickedEmbedElement
+            : messageElement.querySelector(EMBED_ELEMENT_SELECTOR);
+
+        const reactContext = this.getReactMessageContext(messageElement);
+        const identity = this.getMessageIdentity(messageElement);
         const props = {
             ...(reactContext?.props || {}),
             target,
@@ -309,12 +318,15 @@ module.exports = class EmbedCopy {
 
         const messageContext = this.getMessageContext(message, props);
         const embeds = messageContext.embeds;
-        if (!embeds.length || !this.isEphemeralMessage(messageContext, embedElement)) return null;
+        if ((!embeds.length && !this.isComponentsV2Message(messageContext))
+            || !this.isEphemeralMessage(messageContext, messageElement)) return null;
 
         return {
             embeds,
             messageContext,
-            selectedEmbed: this.resolveSelectedEmbed(props, embeds) ?? embeds[0]
+            selectedEmbed: embeds.length
+                ? this.resolveSelectedEmbed(props, embeds) ?? embeds[0]
+                : null
         };
     }
 
@@ -348,11 +360,20 @@ module.exports = class EmbedCopy {
         };
     }
 
-    isEphemeralMessage(messageContext, embedElement) {
+    isEphemeralMessage(messageContext, messageElement) {
         const flags = this.normalizeInteger(messageContext?.flags);
         if (flags !== null && (flags & EPHEMERAL_MESSAGE_FLAG) === EPHEMERAL_MESSAGE_FLAG) return true;
 
-        return Boolean(embedElement.closest("[class*='ephemeral']"));
+        return messageElement.matches(EPHEMERAL_MESSAGE_SELECTOR);
+    }
+
+    isComponentsV2Message(messageContext) {
+        const flags = this.normalizeInteger(messageContext?.flags);
+        return Boolean(
+            messageContext?.components?.length
+            && flags !== null
+            && (flags & COMPONENTS_V2_MESSAGE_FLAG) === COMPONENTS_V2_MESSAGE_FLAG
+        );
     }
 
     openEphemeralEmbedMenu(event, {selectedEmbed, embeds, messageContext}) {
@@ -387,6 +408,7 @@ module.exports = class EmbedCopy {
             author: sourceMessage?.author || message?.author,
             channel: props?.channel || sourceMessage?.channel,
             attachments: this.toArrayLike(sourceMessage?.attachments || message?.attachments),
+            components: this.toArrayLike(sourceMessage?.components || message?.components),
             flags: this.normalizeInteger(this.pickValue(sourceMessage, ["flags"]))
         };
     }
@@ -520,11 +542,10 @@ module.exports = class EmbedCopy {
     }
 
     buildEmbedCopyMenuItem(selectedEmbed, embeds, messageContext) {
-        return {
-            id: "embed-copy",
-            label: "EmbedCopy",
-            type: "submenu",
-            items: [
+        const items = [];
+
+        if (selectedEmbed) {
+            items.push(
                 {
                     id: "embed-copy-raw",
                     label: "Copy Raw Embed",
@@ -540,7 +561,31 @@ module.exports = class EmbedCopy {
                     label: "Copy Discohook Embed",
                     action: () => this.copyDiscohookEmbeds(embeds, messageContext)
                 }
-            ]
+            );
+        }
+
+        if (this.isComponentsV2Message(messageContext)) {
+            if (items.length) items.push({type: "separator"});
+
+            items.push(
+                {
+                    id: "embed-copy-components-raw",
+                    label: "Copy Raw Components",
+                    action: () => this.copyRawComponents(messageContext)
+                },
+                {
+                    id: "embed-copy-components-discohook",
+                    label: "Copy Discohook Components",
+                    action: () => this.copyDiscohookComponents(messageContext)
+                }
+            );
+        }
+
+        return {
+            id: "embed-copy",
+            label: "EmbedCopy",
+            type: "submenu",
+            items
         };
     }
 
@@ -692,15 +737,16 @@ module.exports = class EmbedCopy {
         return context;
     }
 
-    applyDiscohookMessageContext(payload, messageContext) {
+    applyDiscohookMessageContext(payload, messageContext, options = {}) {
         const includeMessageContext = this.settings[SETTING_INCLUDE_MESSAGE_CONTEXT];
+        const includeContent = options.includeContent !== false;
         const profile = this.normalizeWebhookProfile(messageContext);
         const thread = this.settings[SETTING_INCLUDE_FORUM_THREAD]
             ? this.normalizeThreadContext(messageContext)
             : {};
 
         if (includeMessageContext) {
-            this.assignIfPresent(payload, "content", messageContext?.content);
+            if (includeContent) this.assignIfPresent(payload, "content", messageContext?.content);
             this.assignIfPresent(payload, "username", profile.name);
             this.assignIfPresent(payload, "avatar_url", profile.avatar_url);
         }
@@ -709,6 +755,51 @@ module.exports = class EmbedCopy {
         if (this.settings[SETTING_DISCOHOOK_TARGET] !== DISCOHOOK_TARGET_ORG) {
             this.assignIfPresent(payload, "thread_id", thread.id);
         }
+    }
+
+    copyRawComponents(messageContext) {
+        const components = this.normalizeComponents(messageContext?.components);
+        const flags = this.settings[SETTING_RAW_EXPOSE_ALL] && messageContext?.flags !== null
+            ? messageContext.flags
+            : COMPONENTS_V2_MESSAGE_FLAG;
+        const payload = {
+            ...this.normalizeRawMessageContext(messageContext),
+            flags,
+            components
+        };
+
+        this.copyJson(payload, "Raw Components V2 payload copied to clipboard.");
+    }
+
+    copyDiscohookComponents(messageContext) {
+        const payload = {
+            flags: COMPONENTS_V2_MESSAGE_FLAG,
+            components: this.normalizeComponents(messageContext?.components)
+        };
+
+        if (this.shouldCopyDiscohookMessageContext()) {
+            this.applyDiscohookMessageContext(payload, messageContext, {includeContent: false});
+        }
+
+        this.copyJson(payload, "Discohook Components V2 payload copied to clipboard.");
+    }
+
+    normalizeComponents(components) {
+        return this.toArrayLike(components).map(component => {
+            try {
+                const source = typeof component.toJS === "function"
+                    ? component.toJS()
+                    : typeof component.toJSON === "function"
+                        ? component.toJSON()
+                        : component;
+
+                return JSON.parse(JSON.stringify(source));
+            }
+            catch (error) {
+                this.reportError("Failed to normalize a Components V2 item.", error);
+                return null;
+            }
+        }).filter(component => component && typeof component === "object");
     }
 
     shouldCopyDiscohookMessageContext() {
