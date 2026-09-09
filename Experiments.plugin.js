@@ -555,37 +555,39 @@ module.exports = class Experiments {
     patchExperimentUrlHelpers(run = this.activeRun) {
         if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
-        if (!webpack?.getAllBySource) return;
+        if (!webpack) return;
 
-        try {
-            const modules = webpack.getAllBySource(EXPERIMENT_URL_HELPER_MARKER, {
-                raw: true,
-                fatal: false
-            });
+        if (webpack.getAllBySource) {
+            try {
+                const modules = webpack.getAllBySource(EXPERIMENT_URL_HELPER_MARKER, {
+                    raw: true,
+                    fatal: false
+                });
 
-            for (const module of modules || []) {
-                if (!this.isRunActive(run)) return;
-                this.patchExperimentUrlHelperModule(module?.exports, run);
+                for (const module of modules || []) {
+                    if (!this.isRunActive(run)) return;
+                    this.patchExperimentUrlHelperModule(module?.exports, run);
+                }
+            }
+            catch (error) {
+                console.error(`[${this.pluginName}] Failed to patch experiment URL helpers.`, error);
             }
         }
-        catch (error) {
-            console.error(`[${this.pluginName}] Failed to patch experiment URL helpers.`, error);
-        }
+
+        this.watchLazyExperimentUrlHelpers(run);
     }
 
     patchExperimentUrlHelperModule(exports, run = this.activeRun) {
-        if (!this.isRunActive(run) || !exports || typeof exports !== "object") return;
+        if (!this.isRunActive(run) || !exports || (typeof exports !== "object" && typeof exports !== "function")) return;
         if (run.experimentUrlHelperModules.has(exports)) return;
         if (!BdApi?.Patcher?.instead) return;
 
-        const hasHelperShape = typeof exports.W0 === "function"
-            && typeof exports.OL === "function"
-            && typeof exports.Kb === "function";
-        if (!hasHelperShape) return;
+        const helpers = this.getExperimentUrlHelperSelection(exports);
+        if (!helpers) return;
 
         run.experimentUrlHelperModules.add(exports);
 
-        BdApi.Patcher.instead(this.pluginName, exports, "W0", (thisObject, args, original) => {
+        BdApi.Patcher.instead(this.pluginName, exports, helpers.matchKey, (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
             if (!this.isRunActive(run)) return originalResult;
             if (originalResult) return originalResult;
@@ -593,7 +595,7 @@ module.exports = class Experiments {
             return this.getExperimentUrlMatch(args?.[0]) !== null;
         });
 
-        BdApi.Patcher.instead(this.pluginName, exports, "OL", (thisObject, args, original) => {
+        BdApi.Patcher.instead(this.pluginName, exports, helpers.idKey, (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
             if (!this.isRunActive(run)) return originalResult;
             if (originalResult != null) return originalResult;
@@ -601,7 +603,7 @@ module.exports = class Experiments {
             return this.getExperimentUrlId(args?.[0]);
         });
 
-        BdApi.Patcher.instead(this.pluginName, exports, "Kb", (thisObject, args, original) => {
+        BdApi.Patcher.instead(this.pluginName, exports, helpers.treatmentKey, (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
             if (!this.isRunActive(run)) return originalResult;
             if (Number.isFinite(originalResult)) return originalResult;
@@ -609,12 +611,123 @@ module.exports = class Experiments {
             const treatment = this.getExperimentUrlTreatment(args?.[0]);
             if (treatment == null) return null;
 
-            if (/^-?\d+$/.test(treatment)) return Number(treatment);
+            if (/^-?\d+$/.test(treatment)) {
+                const numericTreatment = Number(treatment);
+                return Number.isFinite(numericTreatment) ? numericTreatment : null;
+            }
 
             const experimentId = this.getExperimentUrlId(args?.[0]);
-            const matchedTreatment = this.findExperimentTreatmentByLabel(exports, experimentId, treatment);
+            const matchedTreatment = this.findExperimentTreatmentByLabel(
+                exports,
+                experimentId,
+                treatment,
+                helpers.optionKey || null
+            );
             return matchedTreatment ?? null;
         });
+    }
+
+    watchLazyExperimentUrlHelpers(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+        const webpack = BdApi?.Webpack;
+        const bySource = webpack?.Filters?.bySource;
+        if (!webpack?.waitForModule || !bySource) return;
+
+        const signal = this.getLazyGuardSignal(run);
+        if (!signal) return;
+
+        try {
+            const sourceFilter = bySource(EXPERIMENT_URL_HELPER_MARKER);
+            webpack.waitForModule((exports, module, id) => {
+                if (!this.isRunActive(run)) return false;
+                return this.isExperimentUrlHelperModule(exports, module, id, sourceFilter);
+            }, {
+                raw: true,
+                searchExports: false,
+                searchDefault: false,
+                fatal: false,
+                signal
+            }).then(module => {
+                if (!this.isRunActive(run)) return;
+                this.patchExperimentUrlHelperModule(module?.exports, run);
+            }).catch(error => {
+                if (this.isRunActive(run) && error?.name !== "AbortError") {
+                    console.error(`[${this.pluginName}] Failed while waiting for experiment URL helpers.`, error);
+                }
+            });
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to watch experiment URL helpers.`, error);
+        }
+    }
+
+    isExperimentUrlHelperModule(exports, module, id, sourceFilter) {
+        try {
+            return sourceFilter(exports, module, id)
+                && Boolean(this.getExperimentUrlHelperSelection(exports));
+        }
+        catch {
+            return false;
+        }
+    }
+
+    getExperimentUrlHelperSelection(exports) {
+        const matcher = this.getUniqueCallableExport(exports, value => this.isExperimentUrlMatcher(value));
+        const id = this.getUniqueCallableExport(exports, value => this.isExperimentUrlIdHelper(value));
+        const treatment = this.getUniqueCallableExport(exports, value => this.isExperimentUrlTreatmentHelper(value));
+        if (!matcher || !id || !treatment) return null;
+
+        const coreKeys = new Set([matcher.key, id.key, treatment.key]);
+        if (coreKeys.size !== 3) return null;
+
+        const options = this.getUniqueCallableExport(exports, value => this.isExperimentUrlOptionsHelper(value));
+        return {
+            matchKey: matcher.key,
+            idKey: id.key,
+            treatmentKey: treatment.key,
+            optionKey: options && !coreKeys.has(options.key) ? options.key : null
+        };
+    }
+
+    isExperimentUrlMatcher(value) {
+        const source = this.functionSource(value);
+        return /\breturn\s+[A-Za-z_$][\w$]*\s*\.\s*test\s*\(\s*[A-Za-z_$][\w$]*\s*\)/.test(source)
+            || /=>\s*[A-Za-z_$][\w$]*\s*\.\s*test\s*\(\s*[A-Za-z_$][\w$]*\s*\)/.test(source);
+    }
+
+    isExperimentUrlIdHelper(value) {
+        const source = this.functionSource(value);
+        const matchVariable = this.getExperimentUrlMatchVariable(source);
+        if (!matchVariable) return false;
+
+        const variable = matchVariable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`(?:^|[^\\w$])${variable}\\s*\\.\\s*length\\s*<\\s*2(?![\\d.])`).test(source)
+            && new RegExp(`(?:^|[^\\w$])${variable}\\s*\\[\\s*1\\s*\\]`).test(source);
+    }
+
+    isExperimentUrlTreatmentHelper(value) {
+        const source = this.functionSource(value);
+        const matchVariable = this.getExperimentUrlMatchVariable(source);
+        if (!matchVariable) return false;
+
+        const variable = matchVariable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`(?:^|[^\\w$])${variable}\\s*\\.\\s*length\\s*<\\s*3(?![\\d.])`).test(source)
+            && new RegExp(`parseInt\\s*\\(\\s*${variable}\\s*\\[\\s*2\\s*\\]\\s*,\\s*10\\s*\\)`).test(source);
+    }
+
+    getExperimentUrlMatchVariable(source) {
+        return source.match(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\s*\.\s*match\s*\(\s*[A-Za-z_$][\w$]*\s*\)/)?.[1] || null;
+    }
+
+    isExperimentUrlOptionsHelper(value) {
+        const source = this.functionSource(value);
+        const callback = source.match(/\.\s*map\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*(?:\)\s*)?=>/);
+        if (!callback) return false;
+
+        const row = callback[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`\\bid\\s*:\\s*${row}\\s*\\.\\s*id`).test(source)
+            && new RegExp(`\\blabel\\s*:\\s*${row}\\s*\\.\\s*label`).test(source)
+            && new RegExp(`\\bvalue\\s*:\\s*${row}\\s*\\.\\s*id`).test(source);
     }
 
     getExperimentUrlMatch(url) {
@@ -641,31 +754,117 @@ module.exports = class Experiments {
         }
     }
 
-    findExperimentTreatmentByLabel(helpers, experimentId, treatment) {
-        if (!experimentId || typeof helpers?.hp !== "function") return null;
+    findExperimentTreatmentByLabel(helpers, experimentId, treatment, optionKey = "hp") {
+        const target = this.cleanExperimentLabel(treatment);
+        if (!target) return null;
 
-        let options = [];
+        let descriptor = null;
         try {
-            options = helpers.hp(experimentId) || [];
+            descriptor = this.resolveExperimentForTreatmentOptions(experimentId);
+        }
+        catch {
+            return null;
+        }
+        if (!descriptor || typeof optionKey !== "string") return null;
+
+        let options;
+        try {
+            const helper = helpers?.[optionKey];
+            if (typeof helper !== "function") return null;
+            options = helper.call(helpers, descriptor) || [];
         }
         catch {
             return null;
         }
 
-        const target = this.cleanExperimentLabel(treatment);
-        if (!target) return null;
+        if (!Array.isArray(options)) return null;
 
-        const match = options.find(option => {
-            return this.cleanExperimentLabel(option?.label) === target
-                || this.cleanExperimentLabel(option?.value) === target
-                || this.cleanExperimentLabel(option?.id) === target;
-        });
+        for (const option of options) {
+            let matches = false;
+            let selected = null;
+            try {
+                matches = this.cleanExperimentLabel(option?.label) === target
+                    || this.cleanExperimentLabel(option?.value) === target
+                    || this.cleanExperimentLabel(option?.id) === target;
+                if (matches) selected = option?.value ?? option?.id;
+            }
+            catch {
+                return null;
+            }
 
-        return match ? match.value ?? match.id ?? null : null;
+            if (matches) return Number.isFinite(selected) ? selected : null;
+        }
+
+        return null;
     }
 
     cleanExperimentLabel(value) {
         return String(value ?? "").replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
+    }
+
+    resolveExperimentForTreatmentOptions(experimentId) {
+        if (typeof experimentId !== "string" || !experimentId) return null;
+        const lookup = entries => entries && Object.prototype.hasOwnProperty.call(entries, experimentId)
+            ? entries[experimentId] : null;
+
+        // Project the native hooks' system/variants fields used by the option helper.
+        // Read registered data; calling the hooks here would violate React's lifecycle.
+        let legacy;
+        try {
+            legacy = lookup(this.getStore("ExperimentStore")?.getRegisteredExperiments?.());
+        }
+        catch {}
+        if (legacy != null) {
+            try {
+                if (!Array.isArray(legacy.buckets) || !legacy.buckets.every(Number.isFinite)) return null;
+                const indexedLabels = legacy.description != null && typeof legacy.description === "object";
+                const bucketNames = indexedLabels ? null : this.getWebpackModule(candidate => {
+                    return typeof candidate?.getExperimentBucketName === "function"
+                        && typeof candidate?.experimentDescriptorEquals === "function";
+                }, {searchExports: true});
+                if (!indexedLabels && !bucketNames) return null;
+                return {
+                    system: "legacy",
+                    variants: legacy.buckets.map((id, index) => ({
+                        id,
+                        label: indexedLabels ? legacy.description[index] : bucketNames.getExperimentBucketName(id)
+                    }))
+                };
+            }
+            catch { return null; }
+        }
+
+        const apexStore = this.getStore("ApexExperimentStore");
+        let metadata, registered;
+        try { metadata = lookup(apexStore?.getExperimentsMetadata?.()); }
+        catch {}
+        try { registered = lookup(apexStore?.getRegisteredExperiments?.()); }
+        catch {}
+        if (metadata == null && registered == null) return null;
+
+        try {
+            const variants = [];
+            const present = new Set();
+            if (metadata != null) {
+                if (!Array.isArray(metadata.variants)) return null;
+                for (const variant of metadata.variants) {
+                    if (!Number.isFinite(variant?.id)) return null;
+                    variants.push({id: variant.id, label: `Variant ${variant.id}: ${variant.label}`});
+                    present.add(variant.id);
+                }
+            }
+            if (registered != null) {
+                if (!registered.variations || typeof registered.variations !== "object") return null;
+                for (const key of Object.keys(registered.variations)) {
+                    const id = Number(key);
+                    if (!Number.isFinite(id)) return null;
+                    if (!present.has(id)) variants.push({id, label: `Variant ${id}`});
+                }
+            }
+            if (metadata != null) variants.sort((left, right) => left.id - right.id);
+            return {system: "apex", variants};
+        }
+        catch { return null; }
     }
 
     functionSource(value) {

@@ -796,34 +796,38 @@ test("all forced users restore, payload copies stay unchanged, and each run trac
 
 test("source-matched helpers restore on stop and reapply on the same instance", () => {
     const harness = createHarness();
+    const nativePattern = /^dev:\/\/experiment\/([-\w._0-9]+)(?:\/([0-9]+))?$/i;
     const helpers = {
-        W0() {
-            return false;
+        matchUrl(value) {
+            return nativePattern.test(value);
         },
-        OL() {
-            return null;
+        readExperimentId(value) {
+            const match = value.match(nativePattern);
+            return match == null || match.length < 2 ? null : match[1];
         },
-        Kb() {
-            return NaN;
+        readTreatment(value) {
+            const match = value.match(nativePattern);
+            return match == null || match.length < 3 ? NaN : parseInt(match[2], 10);
         },
-        hp() {
-            return [];
+        buildOptions(values) {
+            return values.map(value => ({id: value.id, label: value.label, value: value.id}));
         }
     };
     harness.sourceModules.set('"^dev://experiment/', [{exports: helpers}]);
     const plugin = new Experiments({name: "Experiments", version: "1.6.2"});
 
     plugin.start();
-    assert.equal(helpers.W0("dev://experiment/example"), true);
-    assert.equal(helpers.OL("dev://experiment/example"), "example");
+    assert.equal(helpers.matchUrl("dev://experiment/example/-1"), true);
+    assert.equal(helpers.readExperimentId("dev://experiment/example/-1"), "example");
+    assert.equal(helpers.readTreatment("dev://experiment/example"), null);
     plugin.stop();
-    assert.equal(helpers.W0("dev://experiment/example"), false);
-    assert.equal(helpers.OL("dev://experiment/example"), null);
-    assert.equal(Number.isNaN(helpers.Kb("dev://experiment/example")), true);
+    assert.equal(helpers.matchUrl("dev://experiment/example/-1"), false);
+    assert.equal(helpers.readExperimentId("dev://experiment/example/-1"), null);
+    assert.equal(Number.isNaN(helpers.readTreatment("dev://experiment/example")), true);
 
     plugin.start();
-    assert.equal(helpers.W0("dev://experiment/example"), true);
-    assert.equal(helpers.OL("dev://experiment/example"), "example");
+    assert.equal(helpers.matchUrl("dev://experiment/example/-1"), true);
+    assert.equal(helpers.readExperimentId("dev://experiment/example/-1"), "example");
     plugin.stop();
 });
 
