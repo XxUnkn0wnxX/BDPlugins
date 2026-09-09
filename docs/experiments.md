@@ -32,3 +32,10 @@ It is a BetterDiscord-native runtime port modeled after [Equicord's Experiments 
 - Server-side experiment behavior cannot be enabled locally.
 - Discord runtime changes can break experiment store patches, dev links, or toolbar behavior.
 - Disable the plugin to remove injected UI and restore patched local state.
+
+<details>
+<summary>Development note</summary>
+
+Adapted through Equicord Experiments commit [`f36f74612`](https://github.com/Equicord/Equicord/commit/f36f74612550a77703cc3986b0e0fe1b3df412df).
+
+</details>

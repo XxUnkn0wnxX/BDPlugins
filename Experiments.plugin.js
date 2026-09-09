@@ -2,7 +2,7 @@
  * @name Experiments
  * @author XxUnkn0wnxX (AI)
  * @authorId 361510310504562699
- * @version 1.6.2
+ * @version 1.6.3
  * @description Enables Discord experiments and developer-only experiment UI in BetterDiscord, modeled after Equicord's Experiments plugin.
  * @license AGPL-3.0-or-later
  * @source https://github.com/XxUnkn0wnxX/BDPlugins/tree/main
@@ -52,7 +52,7 @@ module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
         this.pluginName = this.meta.name || PLUGIN_NAME;
-        this.version = this.meta.version || "1.6.0";
+        this.version = this.meta.version || "1.6.3";
         this.settings = {...DEFAULT_SETTINGS};
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
@@ -301,125 +301,21 @@ module.exports = class Experiments {
             subtitle: `v${this.version}`,
             changes: [
                 {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added a BetterDiscord-native Experiments plugin based on Equicord's experiment access behavior.",
-                        "Added local developer access patches, experiment store refreshes, and startup self-healing.",
-                        "Added an experiments-page warning card and staff bug-report popout hiding."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added a scoped bug-reporter experiment bucket patch to expose Discord's own toolbar developer/bug-report menu path without scanning Webpack modules."
-                    ]
-                },
-                {
                     title: "Fixed",
                     type: "fixed",
                     items: [
-                        "Patched the public ExperimentStore object as well as the dispatcher node so the toolbar developer menu bucket is forced on current Discord builds."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added BetterDiscord-owned experiment URL helper patches for negative treatment IDs and treatment-label links."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added scoped staff-gate wrappers for experiment and playground dev-link embeds without globally forcing Discord staff methods."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added BetterDiscord-native settings for Equicord's toolbar developer menu toggle and DevTools shortcut information."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Blocked staff-help popout trigger clicks when Discord exposes the toolbar developer menu."
-                    ]
-                },
-                {
-                    title: "Added",
-                    type: "added",
-                    items: [
-                        "Added BetterDiscord-owned runtime guards for experiment embed assignment lookups."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Added a getServerAssignment null guard for malformed experiment embed data."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Removed direct Webpack chunk push wrapping and avoided private plugin-library require access so other plugins can keep their module hooks stable."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Disabled unsupported source-factory rewriting until the experiment embed module can be ported with BetterDiscord-owned APIs only."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Patched source-identified getServerAssignment store exports in addition to prototype targets."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Wrapped experiment dev-link embed rendering in a local error boundary fallback to prevent malformed links from crashing Discord."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Stopped trying to redefine Discord's non-configurable isStaff and isStaffPersonal methods, which flooded debug.log with TypeError entries."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Stopped sending a synthetic OVERLAY_INITIALIZE payload to Discord's ExperimentStore; current Discord builds expect experiment-load state there."
-                    ]
-                },
-                {
-                    title: "Fixed",
-                    type: "fixed",
-                    items: [
-                        "Removed the Stage 1 Webpack discovery scanner so this plugin does not touch shared lookup paths or conflict with other plugins."
+                        "Updated experiment and playground embeds for current Discord builds.",
+                        "Fixed treatment-label links while retaining negative treatment support.",
+                        "Fixed cleanup when disabling and re-enabling during pending module loads.",
+                        "Improved playground loading on recent BetterDiscord versions.",
+                        "Suppressed the exact experiment metadata 403 console log while the plugin is enabled."
                     ]
                 },
                 {
                     title: "Notes",
                     type: "progress",
                     items: [
-                        "Server-side experiment behavior still cannot be enabled locally.",
-                        "Disable the plugin to restore the local user flags and remove injected UI."
+                        "Server-side experiment behavior still requires Discord permissions."
                     ]
                 }
             ]
