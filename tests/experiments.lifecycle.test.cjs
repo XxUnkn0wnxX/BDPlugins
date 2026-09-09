@@ -13,6 +13,7 @@ function createHarness() {
     const listeners = new Map();
     const saved = new Map();
     const sourceModules = new Map();
+    const moduleFactories = new Map();
     const styleCalls = {add: 0, remove: 0};
     const patches = [];
     const calls = {connection: [], storeChanges: 0};
@@ -208,12 +209,16 @@ function createHarness() {
             getStore(name) {
                 return {UserStore: userStore, ExperimentStore: experimentStore}[name] || null;
             },
-            getAllBySource(marker) {
-                return sourceModules.get(marker) || [];
+            getAllBySource(...searches) {
+                if (searches.at(-1) && typeof searches.at(-1) === "object") searches.pop();
+                return sourceModules.get(searches.join("\u0000")) || [];
             },
             Filters: {
-                bySource(marker) {
-                    return {marker};
+                bySource(...markers) {
+                    return (_, module) => {
+                        const source = moduleFactories.get(module?.id);
+                        return typeof source === "string" && markers.every(marker => source.includes(marker));
+                    };
                 }
             },
             waitForModule(filter, options) {
@@ -232,6 +237,7 @@ function createHarness() {
         observers,
         patcher,
         saved,
+        moduleFactories,
         sourceModules,
         styleCalls,
         timeouts,
@@ -251,6 +257,29 @@ function startPlugin() {
 async function settle() {
     await Promise.resolve();
     await Promise.resolve();
+}
+
+const PLAYGROUND_COMPONENT_SOURCE = "function PlaygroundEmbed(){(0,configs.useComponentPlaygroundConfigs) ( ); PlaygroundStore.setState({});}";
+const PLAYGROUND_REGISTRY_SOURCE = "function useComponentPlaygroundConfigs(){return []; }";
+const DEV_LINK_RULE_FACTORY_SOURCE = "function createRules(){return {devLink:{match:(url,context)=>context.allowDevLinks ? null : null,parse:(url,context)=>({target:url,type : 'devLink'}),react(){}}};}";
+
+function withFunctionSource(value, source) {
+    Object.defineProperty(value, "toString", {
+        configurable: true,
+        value() {
+            return source;
+        }
+    });
+    return value;
+}
+
+function rawModule(harness, id, exports, source) {
+    harness.moduleFactories.set(id, source);
+    return {id, exports};
+}
+
+function findMatchingWait(waits, module) {
+    return waits.find(wait => wait.filter(module.exports, module, module.id));
 }
 
 test("same instance can restart with fresh patches and restored state", () => {
@@ -288,34 +317,209 @@ test("same instance can restart with fresh patches and restored state", () => {
 
 test("resolved lazy waits from stopped runs cannot patch a successor", async () => {
     const {harness, plugin} = startPlugin();
-    const staleWaits = [...harness.waits];
-    const target = {
+    const component = withFunctionSource(function PlaygroundEmbed() {
+        return "native";
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const staleModule = rawModule(harness, "stale-playground", {renamed: component}, PLAYGROUND_COMPONENT_SOURCE);
+    const staleWait = findMatchingWait(harness.waits, staleModule);
+    const serverTarget = {
         getServerAssignment() {
             return "native";
         }
     };
-    const playgroundModule = {
-        exports: {
-            PlaygroundEmbed() {
-                return "useComponentPlaygroundConfigs";
-            }
-        }
-    };
+    const staleServerModule = rawModule(harness, "stale-server", serverTarget, "}getServerAssignment(");
+    const staleServerSourceWait = findMatchingWait(harness.waits, staleServerModule);
+    const staleServerTargetWait = harness.waits.find(wait => wait !== staleWait
+        && wait !== staleServerSourceWait
+        && wait.filter(serverTarget));
+    assert.ok(staleWait);
+    assert.ok(staleServerSourceWait);
+    assert.ok(staleServerTargetWait);
 
-    staleWaits[0].resolve(playgroundModule);
-    staleWaits[1].resolve({exports: target});
+    staleWait.resolve(staleModule);
+    staleServerSourceWait.resolve(staleServerModule);
     plugin.stop();
     await settle();
     assert.equal(harness.patcher.activeCount(), 0);
+    assert.equal(staleModule.exports.renamed, component);
+    assert.equal(serverTarget.getServerAssignment(null), "native");
 
     plugin.start();
     const beforeResolution = harness.patcher.activeCount();
 
-    staleWaits[2].resolve(target);
+    staleServerTargetWait.resolve(serverTarget);
     await settle();
 
     assert.equal(harness.patcher.activeCount(), beforeResolution);
-    assert.equal(target.getServerAssignment(null), "native");
+    assert.equal(staleModule.exports.renamed, component);
+    assert.equal(serverTarget.getServerAssignment(null), "native");
+    plugin.stop();
+});
+
+test("semantic export discovery patches renamed playground and dev-link exports after natural invocation", () => {
+    const {harness, plugin} = startPlugin();
+    const playgroundCalls = [];
+    const playgroundReceiver = {name: "playground receiver"};
+    const playgroundResult = {name: "playground result"};
+    const PlaygroundEmbed = withFunctionSource(function PlaygroundEmbed(...args) {
+        playgroundCalls.push({
+            receiver: this,
+            args,
+            staff: harness.user.isStaff(),
+            personal: harness.user.isStaffPersonal()
+        });
+        return playgroundResult;
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const playgroundExports = {
+        arbitraryExport: PlaygroundEmbed,
+        markerOnly: withFunctionSource(function markerOnly() {}, "function markerOnly(){useComponentPlaygroundConfigs;}")
+    };
+    Object.defineProperty(playgroundExports, "throwingGetter", {
+        enumerable: true,
+        get() {
+            throw new Error("getter should not abort discovery");
+        }
+    });
+
+    const beforePlaygroundPatch = harness.patcher.activeCount();
+    plugin.patchPlaygroundEmbedModule(playgroundExports);
+    assert.equal(harness.patcher.activeCount(), beforePlaygroundPatch + 1);
+    assert.notEqual(playgroundExports.arbitraryExport, PlaygroundEmbed);
+    assert.equal(playgroundExports.arbitraryExport.call(playgroundReceiver, "first", "second"), playgroundResult);
+    assert.deepEqual(playgroundCalls, [{
+        receiver: playgroundReceiver,
+        args: ["first", "second"],
+        staff: true,
+        personal: true
+    }]);
+    assert.equal(harness.user.isStaff(), false);
+    assert.equal(harness.user.isStaffPersonal(), false);
+
+    const reactCalls = [];
+    const rules = {
+        devLink: {
+            match() {
+                return null;
+            },
+            parse() {
+                return {type: "devLink"};
+            },
+            react(...args) {
+                reactCalls.push({receiver: this, args});
+                return this.result;
+            }
+        }
+    };
+    const factoryCalls = [];
+    const factoryReceiver = {name: "factory receiver"};
+    const RuleFactory = withFunctionSource(function RuleFactory(...args) {
+        factoryCalls.push({receiver: this, args});
+        return rules;
+    }, DEV_LINK_RULE_FACTORY_SOURCE);
+    const ruleExports = {Ay: RuleFactory};
+    Object.defineProperty(ruleExports, "throwingGetter", {
+        enumerable: true,
+        get() {
+            throw new Error("getter should not abort discovery");
+        }
+    });
+
+    const beforeRuleFactoryPatch = harness.patcher.activeCount();
+    plugin.patchExperimentDevLinkRuleFactory(ruleExports);
+    assert.equal(factoryCalls.length, 0);
+    assert.equal(harness.patcher.activeCount(), beforeRuleFactoryPatch + 1);
+    assert.notEqual(ruleExports.Ay, RuleFactory);
+    assert.equal(ruleExports.Ay.call(factoryReceiver, "factory arg"), rules);
+    assert.deepEqual(factoryCalls, [{receiver: factoryReceiver, args: ["factory arg"]}]);
+
+    const reactReceiver = {name: "react receiver", result: {name: "react result"}};
+    const unguardedNode = {target: ["https://example.invalid"]};
+    assert.equal(rules.devLink.react.call(reactReceiver, unguardedNode, "parse result", "key"), reactReceiver.result);
+    assert.deepEqual(reactCalls, [{
+        receiver: reactReceiver,
+        args: [unguardedNode, "parse result", "key"]
+    }]);
+
+    const beforeInvalidRules = harness.patcher.activeCount();
+    plugin.patchExperimentDevLinkRule(null);
+    plugin.patchExperimentDevLinkRule({devLink: {match() {}, parse() {}, react: "not callable"}});
+    plugin.patchExperimentDevLinkRule({devLink: {match() {}, react() {}}});
+    assert.equal(harness.patcher.activeCount(), beforeInvalidRules);
+
+    const secondPlayground = withFunctionSource(function secondPlayground() {}, PLAYGROUND_COMPONENT_SOURCE);
+    const secondFactory = withFunctionSource(function secondFactory() {
+        throw new Error("discovery must not execute this factory");
+    }, DEV_LINK_RULE_FACTORY_SOURCE);
+    const beforeAmbiguousCandidates = harness.patcher.activeCount();
+    plugin.patchPlaygroundEmbedModule({first: PlaygroundEmbed, second: secondPlayground});
+    plugin.patchExperimentDevLinkRuleFactory({Ay: RuleFactory, renamed: secondFactory});
+    assert.equal(harness.patcher.activeCount(), beforeAmbiguousCandidates);
+    plugin.stop();
+});
+
+test("loaded and late semantic module discovery rejects the playground registry and isolates stopped waiters", async () => {
+    const harness = createHarness();
+    const loadedComponent = withFunctionSource(function loadedComponent() {
+        return "loaded";
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const loadedFactory = withFunctionSource(function loadedFactory() {
+        return {devLink: {match() {}, parse() {}, react() {}}};
+    }, DEV_LINK_RULE_FACTORY_SOURCE);
+    const loadedPlayground = rawModule(harness, "loaded-playground", {renamed: loadedComponent}, PLAYGROUND_COMPONENT_SOURCE);
+    const loadedRules = rawModule(harness, "loaded-rules", {Ay: loadedFactory}, "Clear Treatment " + DEV_LINK_RULE_FACTORY_SOURCE);
+    harness.sourceModules.set("useComponentPlaygroundConfigs\u0000PlaygroundStore.setState", [loadedPlayground]);
+    harness.sourceModules.set("Clear Treatment ", [loadedRules]);
+
+    const plugin = new Experiments({name: "Experiments", version: "1.6.2"});
+    plugin.start();
+    assert.notEqual(loadedPlayground.exports.renamed, loadedComponent);
+    assert.notEqual(loadedRules.exports.Ay, loadedFactory);
+
+    const latePlaygroundComponent = withFunctionSource(function latePlaygroundComponent() {
+        return "late";
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const latePlayground = rawModule(harness, "late-playground", {anotherName: latePlaygroundComponent}, PLAYGROUND_COMPONENT_SOURCE);
+    const registry = rawModule(harness, "playground-registry", {
+        useComponentPlaygroundConfigs: withFunctionSource(function useComponentPlaygroundConfigs() {}, PLAYGROUND_REGISTRY_SOURCE)
+    }, PLAYGROUND_REGISTRY_SOURCE);
+    const lateRulesFactory = withFunctionSource(function lateRulesFactory() {
+        return {devLink: {match() {}, parse() {}, react() {}}};
+    }, DEV_LINK_RULE_FACTORY_SOURCE);
+    const lateRules = rawModule(harness, "late-rules", {renamed: lateRulesFactory}, "Clear Treatment " + DEV_LINK_RULE_FACTORY_SOURCE);
+
+    const playgroundWait = findMatchingWait(harness.waits, latePlayground);
+    const ruleWait = findMatchingWait(harness.waits, lateRules);
+    assert.ok(playgroundWait);
+    assert.ok(ruleWait);
+    assert.equal(playgroundWait.filter(registry.exports, registry, registry.id), false);
+    assert.deepEqual(
+        Object.fromEntries(["raw", "searchExports", "searchDefault", "fatal"].map(key => [key, playgroundWait.options[key]])),
+        {raw: true, searchExports: false, searchDefault: false, fatal: false}
+    );
+    assert.deepEqual(
+        Object.fromEntries(["raw", "searchExports", "searchDefault", "fatal"].map(key => [key, ruleWait.options[key]])),
+        {raw: true, searchExports: false, searchDefault: false, fatal: false}
+    );
+
+    ruleWait.resolve(lateRules);
+    await settle();
+    assert.notEqual(lateRules.exports.renamed, lateRulesFactory);
+
+    plugin.stop();
+    assert.equal(lateRules.exports.renamed, lateRulesFactory);
+    const firstRunWaits = new Set(harness.waits);
+    plugin.start();
+    const beforeStaleResolution = harness.patcher.activeCount();
+    playgroundWait.resolve(latePlayground);
+    await settle();
+    assert.equal(harness.patcher.activeCount(), beforeStaleResolution);
+    assert.equal(latePlayground.exports.anotherName, latePlaygroundComponent);
+
+    const successorWait = findMatchingWait(harness.waits.filter(wait => !firstRunWaits.has(wait)), latePlayground);
+    assert.ok(successorWait);
+    successorWait.resolve(latePlayground);
+    await settle();
+    assert.notEqual(latePlayground.exports.anotherName, latePlaygroundComponent);
     plugin.stop();
 });
 

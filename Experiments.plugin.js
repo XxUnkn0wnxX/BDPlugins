@@ -21,6 +21,7 @@ const EXPERIMENT_URL_HELPER_MARKER = '"^dev://experiment/';
 const EXPERIMENT_DEV_LINK_PREFIX = "dev://experiment/";
 const PLAYGROUND_DEV_LINK_PREFIX = "dev://playground/";
 const PLAYGROUND_EMBED_MARKER = "useComponentPlaygroundConfigs";
+const PLAYGROUND_STORE_MARKER = "PlaygroundStore.setState";
 const EXPERIMENT_URL_FALLBACK = /^dev:\/\/experiment\/([^/\s]+)(?:\/([^/\s]+))?$/i;
 const SETTING_TOOLBAR_DEV_MENU = "toolbarDevMenu";
 const DEFAULT_SETTINGS = {
@@ -668,6 +669,17 @@ module.exports = class Experiments {
     }
 
     functionSource(value) {
+        if (typeof value !== "function") return "";
+
+        try {
+            const ownToString = Object.getOwnPropertyDescriptor(value, "toString")?.value;
+            if (typeof ownToString === "function") {
+                const source = ownToString.call(value);
+                if (typeof source === "string") return source;
+            }
+        }
+        catch {}
+
         try {
             return Function.prototype.toString.call(value);
         }
@@ -676,44 +688,155 @@ module.exports = class Experiments {
         }
     }
 
+    getCallableExports(exports) {
+        if (!exports || (typeof exports !== "object" && typeof exports !== "function")) return [];
+
+        let keys;
+        try {
+            keys = Object.keys(exports);
+        }
+        catch {
+            return [];
+        }
+
+        const callables = [];
+        for (const key of keys) {
+            try {
+                const value = exports[key];
+                if (typeof value === "function") callables.push({key, value});
+            }
+            catch {}
+        }
+
+        return callables;
+    }
+
+    getUniqueCallableExport(exports, predicate) {
+        let match = null;
+
+        for (const candidate of this.getCallableExports(exports)) {
+            try {
+                if (!predicate(candidate.value, candidate.key)) continue;
+            }
+            catch {
+                continue;
+            }
+
+            if (match) return null;
+            match = candidate;
+        }
+
+        return match;
+    }
+
     patchExperimentDevLinkRuntimeGuards(run = this.activeRun) {
         if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
-        if (!webpack?.getAllBySource || !BdApi?.Patcher?.after) return;
+        if (!webpack) return;
 
-        try {
-            const modules = webpack.getAllBySource(EXPERIMENT_EMBED_MARKER, {
-                raw: true,
-                fatal: false
-            });
+        if (webpack.getAllBySource && BdApi?.Patcher?.after) {
+            try {
+                const modules = webpack.getAllBySource(EXPERIMENT_EMBED_MARKER, {
+                    raw: true,
+                    fatal: false
+                });
 
-            for (const module of modules || []) {
-                if (!this.isRunActive(run)) return;
-                this.patchExperimentDevLinkRuleFactory(module?.exports, run);
+                for (const module of modules || []) {
+                    if (!this.isRunActive(run)) return;
+                    this.patchExperimentDevLinkRuleFactory(module?.exports, run);
+                }
+            }
+            catch (error) {
+                console.error(`[${this.pluginName}] Failed to patch experiment dev-link guards.`, error);
             }
         }
-        catch (error) {
-            console.error(`[${this.pluginName}] Failed to patch experiment dev-link guards.`, error);
-        }
+
+        this.watchLazyExperimentDevLinkRuleFactories(run);
     }
 
     patchExperimentDevLinkRuleFactory(exports, run = this.activeRun) {
-        if (!this.isRunActive(run) || !exports || typeof exports.A !== "function") return;
+        if (!this.isRunActive(run) || !BdApi?.Patcher?.after) return;
+        if (!exports || (typeof exports !== "object" && typeof exports !== "function")) return;
         if (run.devLinkRuleFactories.has(exports)) return;
+
+        const factory = this.getUniqueCallableExport(exports, value => this.isExperimentDevLinkRuleFactory(value));
+        if (!factory) return;
 
         run.devLinkRuleFactories.add(exports);
 
-        BdApi.Patcher.after(this.pluginName, exports, "A", (_, __, rules) => {
+        BdApi.Patcher.after(this.pluginName, exports, factory.key, (_, __, rules) => {
             if (!this.isRunActive(run)) return rules;
             this.patchExperimentDevLinkRule(rules, run);
             return rules;
         });
     }
 
+    isExperimentDevLinkRuleFactory(value) {
+        const source = this.functionSource(value);
+        return source.includes("allowDevLinks")
+            && /\btype\s*:\s*["']devLink["']/.test(source);
+    }
+
+    isExperimentDevLinkRuleFactoryModule(exports, module, id, sourceFilter) {
+        try {
+            return sourceFilter(exports, module, id)
+                && Boolean(this.getUniqueCallableExport(exports, value => this.isExperimentDevLinkRuleFactory(value)));
+        }
+        catch {
+            return false;
+        }
+    }
+
+    watchLazyExperimentDevLinkRuleFactories(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+        const webpack = BdApi?.Webpack;
+        const bySource = webpack?.Filters?.bySource;
+        if (!webpack?.waitForModule || !bySource) return;
+
+        const signal = this.getLazyGuardSignal(run);
+        if (!signal) return;
+
+        try {
+            const sourceFilter = bySource(EXPERIMENT_EMBED_MARKER);
+            webpack.waitForModule((exports, module, id) => {
+                if (!this.isRunActive(run)) return false;
+                return this.isExperimentDevLinkRuleFactoryModule(exports, module, id, sourceFilter);
+            }, {
+                raw: true,
+                searchExports: false,
+                searchDefault: false,
+                fatal: false,
+                signal
+            }).then(module => {
+                if (!this.isRunActive(run)) return;
+                this.patchExperimentDevLinkRuleFactory(module?.exports, run);
+            }).catch(error => {
+                if (this.isRunActive(run) && error?.name !== "AbortError") {
+                    console.error(`[${this.pluginName}] Failed while waiting for experiment dev-link rules.`, error);
+                }
+            });
+        }
+        catch (error) {
+            console.error(`[${this.pluginName}] Failed to watch experiment dev-link rules.`, error);
+        }
+    }
+
     patchExperimentDevLinkRule(rules, run = this.activeRun) {
         if (!this.isRunActive(run)) return;
-        const devLink = rules?.devLink;
-        if (!devLink || typeof devLink.react !== "function") return;
+        if (!rules || (typeof rules !== "object" && typeof rules !== "function")) return;
+
+        let devLink;
+        try {
+            devLink = rules.devLink;
+            if (!devLink
+                || typeof devLink.match !== "function"
+                || typeof devLink.parse !== "function"
+                || typeof devLink.react !== "function") return;
+        }
+        catch {
+            return;
+        }
+
         if (run.devLinkRuleTargets.has(devLink)) return;
         if (!BdApi?.Patcher?.instead) return;
 
@@ -854,7 +977,7 @@ module.exports = class Experiments {
         if (!webpack?.getAllBySource) return;
 
         try {
-            const modules = webpack.getAllBySource(PLAYGROUND_EMBED_MARKER, {
+            const modules = webpack.getAllBySource(PLAYGROUND_EMBED_MARKER, PLAYGROUND_STORE_MARKER, {
                 raw: true,
                 fatal: false
             });
@@ -879,8 +1002,14 @@ module.exports = class Experiments {
         if (!signal) return;
 
         try {
-            webpack.waitForModule(bySource(PLAYGROUND_EMBED_MARKER), {
+            const sourceFilter = bySource(PLAYGROUND_EMBED_MARKER, PLAYGROUND_STORE_MARKER);
+            webpack.waitForModule((exports, module, id) => {
+                if (!this.isRunActive(run)) return false;
+                return this.isPlaygroundEmbedModule(exports, module, id, sourceFilter);
+            }, {
                 raw: true,
+                searchExports: false,
+                searchDefault: false,
                 fatal: false,
                 signal
             }).then(module => {
@@ -898,22 +1027,35 @@ module.exports = class Experiments {
     }
 
     patchPlaygroundEmbedModule(exports, run = this.activeRun) {
-        if (!this.isRunActive(run) || !exports || typeof exports !== "object") return;
+        if (!this.isRunActive(run) || !exports || (typeof exports !== "object" && typeof exports !== "function")) return;
         if (run.playgroundEmbedModules.has(exports)) return;
         if (!BdApi?.Patcher?.instead) return;
 
-        const targetKey = ["PlaygroundEmbed", "default"].find(key => {
-            return typeof exports[key] === "function"
-                && this.functionSource(exports[key]).includes(PLAYGROUND_EMBED_MARKER);
-        });
-        if (!targetKey) return;
+        const target = this.getUniqueCallableExport(exports, value => this.isPlaygroundEmbedComponent(value));
+        if (!target) return;
 
         run.playgroundEmbedModules.add(exports);
 
-        BdApi.Patcher.instead(this.pluginName, exports, targetKey, (thisObject, args, original) => {
+        BdApi.Patcher.instead(this.pluginName, exports, target.key, (thisObject, args, original) => {
             if (!this.isRunActive(run)) return original.apply(thisObject, args);
             return this.withTemporaryStaffUser(() => original.apply(thisObject, args), run);
         });
+    }
+
+    isPlaygroundEmbedComponent(value) {
+        const source = this.functionSource(value);
+        return /\.useComponentPlaygroundConfigs\s*\)\s*\(\s*\)/.test(source)
+            && source.includes(PLAYGROUND_STORE_MARKER);
+    }
+
+    isPlaygroundEmbedModule(exports, module, id, sourceFilter) {
+        try {
+            return sourceFilter(exports, module, id)
+                && Boolean(this.getUniqueCallableExport(exports, value => this.isPlaygroundEmbedComponent(value)));
+        }
+        catch {
+            return false;
+        }
     }
 
     patchPlaygroundLazyTypes(element, run = this.activeRun) {
