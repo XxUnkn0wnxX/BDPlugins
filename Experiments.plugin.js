@@ -28,6 +28,26 @@ const DEFAULT_SETTINGS = {
     [SETTING_TOOLBAR_DEV_MENU]: false
 };
 
+/*
+ * Contributor map: start() creates the active run; createRun() owns its
+ * patches, timers, watchers, and cancellation signal; stop() aborts that run
+ * and restores every owned resource before a later start can create another.
+ * resolveInternals() finds local UserStore/dispatcher access, while
+ * patchUserStore(), patchExperimentStores(), and ensureExperiments() keep the
+ * developer payload and experiment stores refreshed as Discord rehydrates.
+ * patchExperimentUrlHelpers() supplies resilient URL parsing, and
+ * findExperimentTreatmentByLabel() resolves human-readable treatment labels.
+ * patchExperimentDevLinkRuntimeGuards() identifies Discord's dev-link rules;
+ * wrapStaffGatedElement() and getStaffWrappedComponentType() scope temporary
+ * staff behavior to the rendered embed instead of changing Discord globally.
+ * getPlaygroundLazyComponentType() reads native lazy state during an active
+ * run without mutating it. It creates an owned React.lazy wrapper, defers
+ * loading until render, and uses public BdApi.Utils.loadEntry() for the
+ * verified loader source; unknown lazy shapes fall back to Discord unchanged.
+ * getSettingsPanel()/updateSetting() own the toolbar/help preference and its
+ * click blocker. installMetadataLogFilter() suppresses only the exact known
+ * metadata 403 console object, preserving the request, store, and HTTP flow.
+ */
 module.exports = class Experiments {
     constructor(meta) {
         this.meta = meta ?? {};
