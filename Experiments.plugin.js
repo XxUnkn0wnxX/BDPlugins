@@ -35,82 +35,190 @@ module.exports = class Experiments {
         this.settings = {...DEFAULT_SETTINGS};
         this.styleId = `${this.pluginName}-style`;
         this.warningId = `${this.pluginName}-warning-card`;
-        this.serverAssignmentTargets = new WeakSet();
-        this.bugReporterStores = new WeakSet();
-        this.experimentUrlHelperModules = new WeakSet();
-        this.playgroundEmbedModules = new WeakSet();
-        this.playgroundLazyTypes = new WeakSet();
-        this.staffWrappedComponentTypes = new WeakMap();
-        this.devLinkRuleFactories = new WeakSet();
-        this.devLinkRuleTargets = new WeakSet();
+        this.activeRun = null;
+        this.stoppingRun = null;
+        this.serverAssignmentTargets = null;
+        this.bugReporterStores = null;
+        this.experimentUrlHelperModules = null;
+        this.playgroundEmbedModules = null;
+        this.playgroundLazyTypes = null;
+        // Recognition survives stop; patch ownership remains scoped to each run.
+        this.knownPlaygroundLazyPayloads = new WeakSet();
+        this.staffWrappedComponentTypes = null;
+        this.devLinkRuleFactories = null;
+        this.devLinkRuleTargets = null;
         this.lazyGuardAbortController = null;
         this.DevLinkErrorBoundary = null;
-        this.originalFlags = new WeakMap();
-        this.forcedMembers = [];
+        this.originalFlags = null;
+        this.forcedMembers = null;
         this.userStore = null;
         this.dispatcher = null;
         this.observer = null;
         this.ensureTimer = null;
+        this.ensureTimeout = null;
+        this.rafHandles = null;
         this.isRunning = false;
         this.ensureQueued = false;
         this.isEnsuring = false;
         this.staffHelpClickBlockerActive = false;
         this.staffHelpClickEvents = ["pointerdown", "mousedown", "click", "keydown"];
-        this.staffHelpClickHandler = event => this.handleStaffHelpInteraction(event);
+        this.staffHelpClickHandler = null;
     }
 
     start() {
+        if (this.stoppingRun || this.isRunActive(this.activeRun)) return;
+
+        const run = this.createRun();
         try {
-            this.isRunning = true;
             this.settings = this.loadSettings();
             this.showChangelogIfNeeded();
-            this.injectStyles();
-            this.resolveInternals();
-            this.patchUserStore();
-            this.patchExperimentStores();
-            this.patchExperimentGuards();
-            this.startStaffHelpClickBlocker();
-            this.ensureExperiments("start");
-            this.startDomObserver();
-            this.queueEnsureWarningCard();
-            this.showToast("Experiments enabled.", "success");
+            this.injectStyles(run);
+            this.resolveInternals(run);
+            if (!this.isRunActive(run)) return;
+            this.patchUserStore(run);
+            this.patchExperimentStores(run);
+            if (!this.isRunActive(run)) return;
+            this.patchExperimentGuards(run);
+            if (!this.isRunActive(run)) return;
+            this.startStaffHelpClickBlocker(run);
+            this.ensureExperiments("start", run);
+            if (!this.isRunActive(run)) return;
+            this.startDomObserver(run);
+            this.queueEnsureWarningCard(run);
+            if (this.isRunActive(run)) this.showToast("Experiments enabled.", "success");
         }
         catch (error) {
             this.reportError("Failed to start.", error);
-            this.stop();
+            this.stop(run);
         }
     }
 
-    stop() {
-        this.isRunning = false;
+    createRun() {
+        const run = {
+            controller: new AbortController(),
+            serverAssignmentTargets: new WeakSet(),
+            bugReporterStores: new WeakSet(),
+            experimentUrlHelperModules: new WeakSet(),
+            playgroundEmbedModules: new WeakSet(),
+            playgroundLazyTypes: new WeakSet(),
+            staffWrappedComponentTypes: new WeakMap(),
+            devLinkRuleFactories: new WeakSet(),
+            devLinkRuleTargets: new WeakSet(),
+            originalFlags: new Map(),
+            forcedMembers: [],
+            lazyPayloads: new Map(),
+            rafHandles: new Set(),
+            userStore: null,
+            dispatcher: null,
+            observer: null,
+            ensureTimer: null,
+            ensureTimeout: null,
+            ensureQueued: false,
+            isEnsuring: false,
+            staffHelpClickBlockerActive: false,
+            staffHelpClickHandler: null
+        };
 
-        if (this.observer) {
-            this.observer.disconnect();
-            this.observer = null;
-        }
-
-        if (this.ensureTimer) {
-            window.clearInterval(this.ensureTimer);
-            this.ensureTimer = null;
-        }
-
-        this.stopStaffHelpClickBlocker();
-
-        try {
-            BdApi?.Patcher?.unpatchAll?.(this.pluginName);
-        }
-        catch {}
-
-        this.lazyGuardAbortController?.abort?.();
-        this.lazyGuardAbortController = null;
-        this.restoreForcedMembers();
-        this.restoreUserFlags();
-        this.flushExperimentStores();
-        this.removeWarningCard();
-        this.removeStyles();
+        this.activeRun = run;
+        this.isRunning = true;
+        this.serverAssignmentTargets = run.serverAssignmentTargets;
+        this.bugReporterStores = run.bugReporterStores;
+        this.experimentUrlHelperModules = run.experimentUrlHelperModules;
+        this.playgroundEmbedModules = run.playgroundEmbedModules;
+        this.playgroundLazyTypes = run.playgroundLazyTypes;
+        this.staffWrappedComponentTypes = run.staffWrappedComponentTypes;
+        this.devLinkRuleFactories = run.devLinkRuleFactories;
+        this.devLinkRuleTargets = run.devLinkRuleTargets;
+        this.lazyGuardAbortController = run.controller;
+        this.originalFlags = run.originalFlags;
+        this.forcedMembers = run.forcedMembers;
+        this.userStore = null;
+        this.dispatcher = null;
+        this.observer = null;
+        this.ensureTimer = null;
+        this.ensureTimeout = null;
+        this.rafHandles = run.rafHandles;
         this.ensureQueued = false;
         this.isEnsuring = false;
-        this.showToast("Experiments disabled.", "info");
+        this.staffHelpClickBlockerActive = false;
+        this.staffHelpClickHandler = null;
+        return run;
+    }
+
+    isRunActive(run) {
+        return Boolean(run && this.activeRun === run && this.isRunning && !run.controller.signal.aborted);
+    }
+
+    stop(run = this.activeRun) {
+        if (!run || this.stoppingRun || this.activeRun !== run) return;
+
+        this.stoppingRun = run;
+        try {
+            this.activeRun = null;
+            this.isRunning = false;
+            run.controller.abort();
+
+            if (this.lazyGuardAbortController === run.controller) this.lazyGuardAbortController = null;
+
+            const observer = run.observer;
+            if (observer) {
+                observer.disconnect();
+                run.observer = null;
+            }
+            if (this.observer === observer) this.observer = null;
+
+            const ensureTimer = run.ensureTimer;
+            if (ensureTimer != null) {
+                window.clearInterval(ensureTimer);
+                run.ensureTimer = null;
+            }
+            if (this.ensureTimer === ensureTimer) this.ensureTimer = null;
+
+            const ensureTimeout = run.ensureTimeout;
+            if (ensureTimeout != null) {
+                window.clearTimeout(ensureTimeout);
+                run.ensureTimeout = null;
+            }
+            if (this.ensureTimeout === ensureTimeout) this.ensureTimeout = null;
+
+            for (const frame of run.rafHandles) window.cancelAnimationFrame(frame);
+            run.rafHandles.clear();
+
+            this.stopStaffHelpClickBlocker(run);
+
+            try {
+                BdApi?.Patcher?.unpatchAll?.(this.pluginName);
+            }
+            catch {}
+
+            this.restoreLazyPayloads(run);
+            this.restoreForcedMembers(run);
+            this.restoreUserFlags(run);
+            this.flushExperimentStores(run, true);
+            run.originalFlags.clear();
+            this.removeWarningCard();
+            this.removeStyles();
+            run.ensureQueued = false;
+            run.isEnsuring = false;
+
+            if (!this.activeRun) {
+                this.userStore = null;
+                this.dispatcher = null;
+                this.observer = null;
+                this.ensureTimer = null;
+                this.ensureTimeout = null;
+                this.rafHandles = null;
+                this.ensureQueued = false;
+                this.isEnsuring = false;
+                this.staffHelpClickBlockerActive = false;
+                this.staffHelpClickHandler = null;
+            }
+
+            this.showToast("Experiments disabled.", "info");
+        }
+        finally {
+            if (this.stoppingRun === run) this.stoppingRun = null;
+        }
     }
 
     getChangelog() {
@@ -328,93 +436,123 @@ module.exports = class Experiments {
         };
         this.saveSettings();
 
-        if (id === SETTING_TOOLBAR_DEV_MENU) {
-            this.injectStyles();
-            if (this.settings[SETTING_TOOLBAR_DEV_MENU]) this.startStaffHelpClickBlocker();
-            else this.stopStaffHelpClickBlocker();
-            this.flushExperimentStores();
-            this.ensureExperiments("settings");
-            this.showToast("Toolbar developer menu setting saved. Reload Discord if the toolbar does not update immediately.", "info");
-        }
+        const run = this.activeRun;
+        if (id !== SETTING_TOOLBAR_DEV_MENU || !this.isRunActive(run)) return;
+
+        this.injectStyles(run);
+        if (!this.isRunActive(run)) return;
+        if (this.settings[SETTING_TOOLBAR_DEV_MENU]) this.startStaffHelpClickBlocker(run);
+        else this.stopStaffHelpClickBlocker(run);
+        if (!this.isRunActive(run)) return;
+        this.flushExperimentStores(run);
+        if (!this.isRunActive(run)) return;
+        this.ensureExperiments("settings", run);
+        this.showToast("Toolbar developer menu setting saved. Reload Discord if the toolbar does not update immediately.", "info");
     }
 
-    resolveInternals() {
-        this.userStore = this.getStore("UserStore") || this.getWebpackModule(module => {
+    resolveInternals(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+
+        const userStore = this.getStore("UserStore", run) || this.getWebpackModule(module => {
             return module?.getCurrentUser && module?.getUsers;
         }, {searchExports: true});
 
-        this.dispatcher = this.userStore?._dispatcher || this.getWebpackModule(module => {
+        if (!this.isRunActive(run)) return;
+
+        const dispatcher = userStore?._dispatcher || this.getWebpackModule(module => {
             return module?.dispatch && module?.subscribe && module?.unsubscribe;
         }, {searchExports: true});
 
-        if (!this.userStore) throw new Error("Could not resolve Discord UserStore.");
-        if (!this.dispatcher) throw new Error("Could not resolve Discord Flux dispatcher.");
+        if (!userStore) throw new Error("Could not resolve Discord UserStore.");
+        if (!dispatcher) throw new Error("Could not resolve Discord Flux dispatcher.");
+        if (!this.isRunActive(run)) return;
+
+        run.userStore = userStore;
+        run.dispatcher = dispatcher;
+        this.userStore = userStore;
+        this.dispatcher = dispatcher;
     }
 
-    patchUserStore() {
-        if (!this.userStore?.getCurrentUser || !BdApi?.Patcher?.after) return;
+    patchUserStore(run = this.activeRun) {
+        if (!this.isRunActive(run) || !run.userStore?.getCurrentUser || !BdApi?.Patcher?.after) return;
 
-        BdApi.Patcher.after(this.pluginName, this.userStore, "getCurrentUser", (_, __, user) => {
-            this.forceDeveloperUser(user);
+        BdApi.Patcher.after(this.pluginName, run.userStore, "getCurrentUser", (_, __, user) => {
+            if (!this.isRunActive(run)) return user;
+            this.forceDeveloperUser(user, run);
             return user;
         });
     }
 
-    patchExperimentStores() {
-        const nodes = this.getDispatcherNodes();
-        this.patchBugReporterExperiment(this.getStore("ExperimentStore"));
+    patchExperimentStores(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+
+        const nodes = this.getDispatcherNodes(run);
+        this.patchBugReporterExperiment(this.getStore("ExperimentStore", run), run);
 
         for (const node of nodes) {
+            if (!this.isRunActive(run)) return;
             if (!node || !["ExperimentStore", "DeveloperExperimentStore"].includes(node.name)) continue;
 
             if (node.storeDidChange && BdApi?.Patcher?.after) {
                 BdApi.Patcher.after(this.pluginName, node, "storeDidChange", () => {
-                    if (!this.isEnsuring) this.queueEnsureExperiments();
+                    if (!this.isRunActive(run) || run.isEnsuring) return;
+                    this.queueEnsureExperiments(run);
                 });
             }
 
             const handler = node.actionHandler;
             if (!handler) continue;
 
-            if (node.name === "ExperimentStore") this.patchBugReporterExperiment(node);
+            if (node.name === "ExperimentStore") this.patchBugReporterExperiment(node, run);
 
             for (const action of ["CONNECTION_OPEN"]) {
                 if (typeof handler[action] !== "function" || !BdApi?.Patcher?.instead) continue;
 
                 BdApi.Patcher.instead(this.pluginName, handler, action, (thisObject, args, original) => {
-                    this.forceDeveloperPayload(args);
+                    if (!this.isRunActive(run)) return original.apply(thisObject, args);
+                    this.forceDeveloperPayload(args, run);
                     const result = original.apply(thisObject, args);
-                    if (!this.isEnsuring) this.queueEnsureExperiments();
+                    if (this.isRunActive(run) && !run.isEnsuring) this.queueEnsureExperiments(run);
                     return result;
                 });
             }
         }
 
-        this.ensureTimer = window.setInterval(() => this.ensureExperiments("interval"), 10000);
+        if (!this.isRunActive(run)) return;
+        const timer = window.setInterval(() => {
+            if (!this.isRunActive(run)) return;
+            this.ensureExperiments("interval", run);
+        }, 10000);
+        run.ensureTimer = timer;
+        if (this.isRunActive(run)) this.ensureTimer = timer;
+        else window.clearInterval(timer);
     }
 
-    patchBugReporterExperiment(experimentStore) {
-        if (!experimentStore?.getUserExperimentBucket || !BdApi?.Patcher?.instead) return;
-        if (this.bugReporterStores.has(experimentStore)) return;
+    patchBugReporterExperiment(experimentStore, run = this.activeRun) {
+        if (!this.isRunActive(run) || !experimentStore?.getUserExperimentBucket || !BdApi?.Patcher?.instead) return;
+        if (run.bugReporterStores.has(experimentStore)) return;
 
-        this.bugReporterStores.add(experimentStore);
+        run.bugReporterStores.add(experimentStore);
 
         BdApi.Patcher.instead(this.pluginName, experimentStore, "getUserExperimentBucket", (thisObject, args, original) => {
+            if (!this.isRunActive(run)) return original.apply(thisObject, args);
             if (!args?.length || typeof args[0] !== "string") return original.apply(thisObject, args);
             if (args?.[0] === BUG_REPORTER_EXPERIMENT && this.settings[SETTING_TOOLBAR_DEV_MENU]) return 1;
             return original.apply(thisObject, args);
         });
     }
 
-    patchExperimentGuards() {
-        this.patchExperimentUrlHelpers();
-        this.patchLoadedPlaygroundEmbedComponents();
-        this.watchLazyPlaygroundEmbedComponents();
-        this.patchExperimentDevLinkRuntimeGuards();
-        this.patchServerAssignmentRuntime();
+    patchExperimentGuards(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+        this.patchExperimentUrlHelpers(run);
+        this.patchLoadedPlaygroundEmbedComponents(run);
+        this.watchLazyPlaygroundEmbedComponents(run);
+        this.patchExperimentDevLinkRuntimeGuards(run);
+        this.patchServerAssignmentRuntime(run);
     }
 
-    patchExperimentUrlHelpers() {
+    patchExperimentUrlHelpers(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
         if (!webpack?.getAllBySource) return;
 
@@ -425,7 +563,8 @@ module.exports = class Experiments {
             });
 
             for (const module of modules || []) {
-                this.patchExperimentUrlHelperModule(module?.exports);
+                if (!this.isRunActive(run)) return;
+                this.patchExperimentUrlHelperModule(module?.exports, run);
             }
         }
         catch (error) {
@@ -433,9 +572,9 @@ module.exports = class Experiments {
         }
     }
 
-    patchExperimentUrlHelperModule(exports) {
-        if (!exports || typeof exports !== "object") return;
-        if (this.experimentUrlHelperModules.has(exports)) return;
+    patchExperimentUrlHelperModule(exports, run = this.activeRun) {
+        if (!this.isRunActive(run) || !exports || typeof exports !== "object") return;
+        if (run.experimentUrlHelperModules.has(exports)) return;
         if (!BdApi?.Patcher?.instead) return;
 
         const hasHelperShape = typeof exports.W0 === "function"
@@ -443,10 +582,11 @@ module.exports = class Experiments {
             && typeof exports.Kb === "function";
         if (!hasHelperShape) return;
 
-        this.experimentUrlHelperModules.add(exports);
+        run.experimentUrlHelperModules.add(exports);
 
         BdApi.Patcher.instead(this.pluginName, exports, "W0", (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
+            if (!this.isRunActive(run)) return originalResult;
             if (originalResult) return originalResult;
 
             return this.getExperimentUrlMatch(args?.[0]) !== null;
@@ -454,6 +594,7 @@ module.exports = class Experiments {
 
         BdApi.Patcher.instead(this.pluginName, exports, "OL", (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
+            if (!this.isRunActive(run)) return originalResult;
             if (originalResult != null) return originalResult;
 
             return this.getExperimentUrlId(args?.[0]);
@@ -461,6 +602,7 @@ module.exports = class Experiments {
 
         BdApi.Patcher.instead(this.pluginName, exports, "Kb", (thisObject, args, original) => {
             const originalResult = original.apply(thisObject, args);
+            if (!this.isRunActive(run)) return originalResult;
             if (Number.isFinite(originalResult)) return originalResult;
 
             const treatment = this.getExperimentUrlTreatment(args?.[0]);
@@ -534,7 +676,8 @@ module.exports = class Experiments {
         }
     }
 
-    patchExperimentDevLinkRuntimeGuards() {
+    patchExperimentDevLinkRuntimeGuards(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
         if (!webpack?.getAllBySource || !BdApi?.Patcher?.after) return;
 
@@ -545,7 +688,8 @@ module.exports = class Experiments {
             });
 
             for (const module of modules || []) {
-                this.patchExperimentDevLinkRuleFactory(module?.exports);
+                if (!this.isRunActive(run)) return;
+                this.patchExperimentDevLinkRuleFactory(module?.exports, run);
             }
         }
         catch (error) {
@@ -553,35 +697,40 @@ module.exports = class Experiments {
         }
     }
 
-    patchExperimentDevLinkRuleFactory(exports) {
-        if (!exports || typeof exports.A !== "function") return;
-        if (this.devLinkRuleFactories.has(exports)) return;
+    patchExperimentDevLinkRuleFactory(exports, run = this.activeRun) {
+        if (!this.isRunActive(run) || !exports || typeof exports.A !== "function") return;
+        if (run.devLinkRuleFactories.has(exports)) return;
 
-        this.devLinkRuleFactories.add(exports);
+        run.devLinkRuleFactories.add(exports);
 
         BdApi.Patcher.after(this.pluginName, exports, "A", (_, __, rules) => {
-            this.patchExperimentDevLinkRule(rules);
+            if (!this.isRunActive(run)) return rules;
+            this.patchExperimentDevLinkRule(rules, run);
             return rules;
         });
     }
 
-    patchExperimentDevLinkRule(rules) {
+    patchExperimentDevLinkRule(rules, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const devLink = rules?.devLink;
         if (!devLink || typeof devLink.react !== "function") return;
-        if (this.devLinkRuleTargets.has(devLink)) return;
+        if (run.devLinkRuleTargets.has(devLink)) return;
         if (!BdApi?.Patcher?.instead) return;
 
-        this.devLinkRuleTargets.add(devLink);
+        run.devLinkRuleTargets.add(devLink);
 
         BdApi.Patcher.instead(this.pluginName, devLink, "react", (thisObject, args, original) => {
+            if (!this.isRunActive(run)) return original.apply(thisObject, args);
             const url = this.getDevLinkUrl(args?.[0]);
             if (!this.isGuardedDevLink(url)) return original.apply(thisObject, args);
-            if (this.isPlaygroundDevLink(url)) this.patchLoadedPlaygroundEmbedComponents();
+            if (this.isPlaygroundDevLink(url)) this.patchLoadedPlaygroundEmbedComponents(run);
+            if (!this.isRunActive(run)) return original.apply(thisObject, args);
 
             try {
                 const element = original.apply(thisObject, args);
-                if (this.isPlaygroundDevLink(url)) this.patchPlaygroundLazyTypes(element);
-                return this.wrapDevLinkElement(element, url);
+                if (!this.isRunActive(run)) return element;
+                if (this.isPlaygroundDevLink(url)) this.patchPlaygroundLazyTypes(element, run);
+                return this.wrapDevLinkElement(element, url, run);
             }
             catch (error) {
                 console.error(`[${this.pluginName}] Blocked experiment dev-link render crash.`, error);
@@ -606,26 +755,28 @@ module.exports = class Experiments {
         return this.isExperimentDevLink(url) || this.isPlaygroundDevLink(url);
     }
 
-    wrapDevLinkElement(element, url) {
+    wrapDevLinkElement(element, url, run = this.activeRun) {
+        if (!this.isRunActive(run)) return element;
         const React = BdApi?.React;
         const Boundary = this.getDevLinkErrorBoundary();
         if (!React || !Boundary) return element;
 
         return React.createElement(Boundary, {
             fallback: this.createDevLinkFallback(url)
-        }, this.wrapStaffGatedElement(element));
+        }, this.wrapStaffGatedElement(element, run));
     }
 
-    wrapStaffGatedElement(element) {
+    wrapStaffGatedElement(element, run = this.activeRun) {
+        if (!this.isRunActive(run)) return element;
         const React = BdApi?.React;
         if (!React?.isValidElement?.(element)) return element;
 
         const children = element.props?.children;
         const wrappedChildren = Array.isArray(children)
-            ? children.map(child => this.wrapStaffGatedElement(child))
-            : this.wrapStaffGatedElement(children);
+            ? children.map(child => this.wrapStaffGatedElement(child, run))
+            : this.wrapStaffGatedElement(children, run);
         const hasWrappedChildren = wrappedChildren !== children;
-        const wrappedType = typeof element.type === "function" ? this.getStaffWrappedComponentType(element.type) : element.type;
+        const wrappedType = typeof element.type === "function" ? this.getStaffWrappedComponentType(element.type, run) : element.type;
 
         if (wrappedType === element.type && !hasWrappedChildren) return element;
 
@@ -636,25 +787,30 @@ module.exports = class Experiments {
         }, wrappedChildren);
     }
 
-    getStaffWrappedComponentType(type) {
-        if (this.staffWrappedComponentTypes.has(type)) return this.staffWrappedComponentTypes.get(type);
+    getStaffWrappedComponentType(type, run = this.activeRun) {
+        if (!this.isRunActive(run)) return type;
+        if (run.staffWrappedComponentTypes.has(type)) return run.staffWrappedComponentTypes.get(type);
 
         const plugin = this;
-        const WrappedComponent = function ExperimentsStaffGatedEmbed(props) {
-            return plugin.withTemporaryStaffUser(() => type(props));
+        const WrappedComponent = function ExperimentsStaffGatedEmbed(...args) {
+            if (!plugin.isRunActive(run)) return type.apply(this, args);
+            return plugin.withTemporaryStaffUser(() => type.apply(this, args), run);
         };
 
         WrappedComponent.displayName = `ExperimentsStaffGated(${type.displayName || type.name || "Component"})`;
-        this.staffWrappedComponentTypes.set(type, WrappedComponent);
+        run.staffWrappedComponentTypes.set(type, WrappedComponent);
         return WrappedComponent;
     }
 
-    withTemporaryStaffUser(callback) {
-        const user = this.userStore?.getCurrentUser?.();
+    withTemporaryStaffUser(callback, run = this.activeRun) {
+        if (!this.isRunActive(run)) return callback();
+
+        const user = run.userStore?.getCurrentUser?.();
+        if (!this.isRunActive(run)) return callback();
         const restore = [];
 
         this.forceTemporaryBooleanMethod(user, "isStaff", restore);
-        this.forceTemporaryBooleanMethod(user, "isStaffPersonal", restore);
+        if (this.isRunActive(run)) this.forceTemporaryBooleanMethod(user, "isStaffPersonal", restore);
 
         try {
             return callback();
@@ -692,7 +848,8 @@ module.exports = class Experiments {
         catch {}
     }
 
-    patchLoadedPlaygroundEmbedComponents() {
+    patchLoadedPlaygroundEmbedComponents(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
         if (!webpack?.getAllBySource) return;
 
@@ -703,7 +860,8 @@ module.exports = class Experiments {
             });
 
             for (const module of modules || []) {
-                this.patchPlaygroundEmbedModule(module?.exports);
+                if (!this.isRunActive(run)) return;
+                this.patchPlaygroundEmbedModule(module?.exports, run);
             }
         }
         catch (error) {
@@ -711,18 +869,25 @@ module.exports = class Experiments {
         }
     }
 
-    watchLazyPlaygroundEmbedComponents() {
+    watchLazyPlaygroundEmbedComponents(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
         const bySource = webpack?.Filters?.bySource;
         if (!webpack?.waitForModule || !bySource) return;
+
+        const signal = this.getLazyGuardSignal(run);
+        if (!signal) return;
 
         try {
             webpack.waitForModule(bySource(PLAYGROUND_EMBED_MARKER), {
                 raw: true,
                 fatal: false,
-                signal: this.getLazyGuardSignal()
-            }).then(module => this.patchPlaygroundEmbedModule(module?.exports)).catch(error => {
-                if (error?.name !== "AbortError") {
+                signal
+            }).then(module => {
+                if (!this.isRunActive(run)) return;
+                this.patchPlaygroundEmbedModule(module?.exports, run);
+            }).catch(error => {
+                if (this.isRunActive(run) && error?.name !== "AbortError") {
                     console.error(`[${this.pluginName}] Failed while waiting for playground embed component.`, error);
                 }
             });
@@ -732,9 +897,9 @@ module.exports = class Experiments {
         }
     }
 
-    patchPlaygroundEmbedModule(exports) {
-        if (!exports || typeof exports !== "object") return;
-        if (this.playgroundEmbedModules.has(exports)) return;
+    patchPlaygroundEmbedModule(exports, run = this.activeRun) {
+        if (!this.isRunActive(run) || !exports || typeof exports !== "object") return;
+        if (run.playgroundEmbedModules.has(exports)) return;
         if (!BdApi?.Patcher?.instead) return;
 
         const targetKey = ["PlaygroundEmbed", "default"].find(key => {
@@ -743,49 +908,114 @@ module.exports = class Experiments {
         });
         if (!targetKey) return;
 
-        this.playgroundEmbedModules.add(exports);
+        run.playgroundEmbedModules.add(exports);
 
         BdApi.Patcher.instead(this.pluginName, exports, targetKey, (thisObject, args, original) => {
-            return this.withTemporaryStaffUser(() => original.apply(thisObject, args));
+            if (!this.isRunActive(run)) return original.apply(thisObject, args);
+            return this.withTemporaryStaffUser(() => original.apply(thisObject, args), run);
         });
     }
 
-    patchPlaygroundLazyTypes(element) {
-        if (!element || typeof element !== "object") return;
+    patchPlaygroundLazyTypes(element, run = this.activeRun) {
+        if (!this.isRunActive(run) || !element || typeof element !== "object") return;
 
         const type = element.type;
-        if (type && typeof type === "object") this.patchPlaygroundLazyType(type);
+        if (type && typeof type === "object") this.patchPlaygroundLazyType(type, run);
 
         const children = element.props?.children;
         if (Array.isArray(children)) {
-            for (const child of children) this.patchPlaygroundLazyTypes(child);
+            for (const child of children) this.patchPlaygroundLazyTypes(child, run);
         }
-        else this.patchPlaygroundLazyTypes(children);
+        else this.patchPlaygroundLazyTypes(children, run);
     }
 
-    patchPlaygroundLazyType(lazyType) {
+    patchPlaygroundLazyType(lazyType, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const payload = lazyType?._payload;
-        if (!payload || typeof payload._result !== "function") return;
-        if (this.playgroundLazyTypes.has(lazyType)) return;
-        if (!this.functionSource(payload._result).includes("PlaygroundEmbed")) return;
+        if (!payload) return;
+        if (run.playgroundLazyTypes.has(lazyType) || run.lazyPayloads.has(payload)) return;
 
-        this.playgroundLazyTypes.add(lazyType);
+        const currentResult = payload._result;
+        if (typeof currentResult !== "function") {
+            if (!this.knownPlaygroundLazyPayloads.has(payload)
+                || payload._status !== 1
+                || !currentResult
+                || typeof currentResult !== "object"
+                || typeof currentResult.default !== "function") return;
 
-        const originalResult = payload._result;
-        payload._result = (...args) => {
-            const result = originalResult.apply(payload, args);
-            if (!result?.then) return this.wrapResolvedPlaygroundModule(result);
-            return result.then(module => this.wrapResolvedPlaygroundModule(module));
+            const record = {
+                payload,
+                originalResult: currentResult,
+                installedResult: null,
+                resolvedModules: new Map()
+            };
+            const wrappedModule = this.wrapResolvedPlaygroundModule(currentResult, run, record);
+            if (wrappedModule === currentResult) return;
+            if (!this.isRunActive(run) || payload._status !== 1 || payload._result !== currentResult) return;
+
+            run.playgroundLazyTypes.add(lazyType);
+            run.lazyPayloads.set(payload, record);
+            payload._result = wrappedModule;
+            return;
+        }
+
+        if (payload._status !== -1 || !this.functionSource(currentResult).includes("PlaygroundEmbed")) return;
+
+        const originalResult = currentResult;
+        const record = {
+            payload,
+            originalResult,
+            installedResult: null,
+            resolvedModules: new Map()
         };
+        const plugin = this;
+        const installedResult = function ExperimentsPlaygroundLazyLoader(...args) {
+            const result = originalResult.apply(payload, args);
+            if (!plugin.isRunActive(run)) return result;
+            if (!result?.then) return plugin.wrapResolvedPlaygroundModule(result, run, record);
+            return result.then(module => {
+                if (!plugin.isRunActive(run)) return module;
+                return plugin.wrapResolvedPlaygroundModule(module, run, record);
+            });
+        };
+        record.installedResult = installedResult;
+        if (!this.isRunActive(run) || payload._status !== -1 || payload._result !== currentResult) return;
+
+        run.playgroundLazyTypes.add(lazyType);
+        this.knownPlaygroundLazyPayloads.add(payload);
+        run.lazyPayloads.set(payload, record);
+        payload._result = installedResult;
     }
 
-    wrapResolvedPlaygroundModule(module) {
-        if (!module || typeof module !== "object") return module;
+    wrapResolvedPlaygroundModule(module, run = this.activeRun, record = null) {
+        if (!this.isRunActive(run) || !module || typeof module !== "object") return module;
         if (typeof module.default !== "function") return module;
-        return {
+        const wrappedModule = {
             ...module,
-            default: this.getStaffWrappedComponentType(module.default)
+            default: this.getStaffWrappedComponentType(module.default, run)
         };
+        if (record) record.resolvedModules.set(wrappedModule, module);
+        return wrappedModule;
+    }
+
+    restoreLazyPayloads(run) {
+        for (const record of run.lazyPayloads.values()) {
+            try {
+                if (typeof record.installedResult === "function" && record.payload._result === record.installedResult) {
+                    record.payload._result = record.originalResult;
+                    continue;
+                }
+
+                for (const [wrappedModule, originalModule] of record.resolvedModules) {
+                    if (record.payload._result === wrappedModule) {
+                        record.payload._result = originalModule;
+                        break;
+                    }
+                }
+            }
+            catch {}
+        }
+        run.lazyPayloads.clear();
     }
 
     createDevLinkFallback(url) {
@@ -824,20 +1054,22 @@ module.exports = class Experiments {
         return this.DevLinkErrorBoundary;
     }
 
-    patchServerAssignmentRuntime() {
-        this.patchLoadedServerAssignmentTargets();
-        this.watchLazyServerAssignmentTargets();
+    patchServerAssignmentRuntime(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+        this.patchLoadedServerAssignmentTargets(run);
+        this.watchLazyServerAssignmentTargets(run);
     }
 
-    patchLoadedServerAssignmentTargets() {
+    patchLoadedServerAssignmentTargets(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
 
-        this.patchLoadedServerAssignmentModulesBySource(webpack);
-        this.patchLoadedServerAssignmentTargetsByPrototype(webpack);
+        this.patchLoadedServerAssignmentModulesBySource(webpack, run);
+        this.patchLoadedServerAssignmentTargetsByPrototype(webpack, run);
     }
 
-    patchLoadedServerAssignmentModulesBySource(webpack) {
-        if (!webpack?.getAllBySource) return;
+    patchLoadedServerAssignmentModulesBySource(webpack, run = this.activeRun) {
+        if (!this.isRunActive(run) || !webpack?.getAllBySource) return;
 
         try {
             const modules = webpack.getAllBySource(SERVER_ASSIGNMENT_MARKER, {
@@ -846,7 +1078,8 @@ module.exports = class Experiments {
             });
 
             for (const module of modules || []) {
-                this.patchServerAssignmentRawModule(module);
+                if (!this.isRunActive(run)) return;
+                this.patchServerAssignmentRawModule(module, run);
             }
         }
         catch (error) {
@@ -854,8 +1087,8 @@ module.exports = class Experiments {
         }
     }
 
-    patchLoadedServerAssignmentTargetsByPrototype(webpack) {
-        if (!webpack?.getAllByPrototypeKeys) return;
+    patchLoadedServerAssignmentTargetsByPrototype(webpack, run = this.activeRun) {
+        if (!this.isRunActive(run) || !webpack?.getAllByPrototypeKeys) return;
 
         try {
             const targets = webpack.getAllByPrototypeKeys("getServerAssignment", {
@@ -865,7 +1098,8 @@ module.exports = class Experiments {
             });
 
             for (const target of targets || []) {
-                this.patchServerAssignmentTarget(target);
+                if (!this.isRunActive(run)) return;
+                this.patchServerAssignmentTarget(target, run);
             }
         }
         catch (error) {
@@ -873,25 +1107,33 @@ module.exports = class Experiments {
         }
     }
 
-    watchLazyServerAssignmentTargets() {
+    watchLazyServerAssignmentTargets(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const webpack = BdApi?.Webpack;
         if (!webpack?.waitForModule) return;
 
-        this.watchLazyServerAssignmentModulesBySource(webpack);
-        this.watchLazyServerAssignmentTargetsByShape(webpack);
+        this.watchLazyServerAssignmentModulesBySource(webpack, run);
+        this.watchLazyServerAssignmentTargetsByShape(webpack, run);
     }
 
-    watchLazyServerAssignmentModulesBySource(webpack) {
+    watchLazyServerAssignmentModulesBySource(webpack, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const bySource = webpack?.Filters?.bySource;
         if (!bySource) return;
+
+        const signal = this.getLazyGuardSignal(run);
+        if (!signal) return;
 
         try {
             webpack.waitForModule(bySource(SERVER_ASSIGNMENT_MARKER), {
                 raw: true,
                 fatal: false,
-                signal: this.getLazyGuardSignal()
-            }).then(module => this.patchServerAssignmentRawModule(module)).catch(error => {
-                if (error?.name !== "AbortError") {
+                signal
+            }).then(module => {
+                if (!this.isRunActive(run)) return;
+                this.patchServerAssignmentRawModule(module, run);
+            }).catch(error => {
+                if (this.isRunActive(run) && error?.name !== "AbortError") {
                     console.error(`[${this.pluginName}] Failed while waiting for source-matched getServerAssignment module.`, error);
                 }
             });
@@ -901,15 +1143,22 @@ module.exports = class Experiments {
         }
     }
 
-    watchLazyServerAssignmentTargetsByShape(webpack) {
+    watchLazyServerAssignmentTargetsByShape(webpack, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+        const signal = this.getLazyGuardSignal(run);
+        if (!signal) return;
+
         try {
             webpack.waitForModule(target => this.isServerAssignmentTarget(target), {
                 searchExports: true,
                 defaultExport: false,
                 fatal: false,
-                signal: this.getLazyGuardSignal()
-            }).then(target => this.patchServerAssignmentTarget(target)).catch(error => {
-                if (error?.name !== "AbortError") {
+                signal
+            }).then(target => {
+                if (!this.isRunActive(run)) return;
+                this.patchServerAssignmentTarget(target, run);
+            }).catch(error => {
+                if (this.isRunActive(run) && error?.name !== "AbortError") {
                     console.error(`[${this.pluginName}] Failed while waiting for getServerAssignment target.`, error);
                 }
             });
@@ -919,11 +1168,12 @@ module.exports = class Experiments {
         }
     }
 
-    patchServerAssignmentRawModule(module) {
-        if (!module?.exports) return;
+    patchServerAssignmentRawModule(module, run = this.activeRun) {
+        if (!this.isRunActive(run) || !module?.exports) return;
 
         for (const target of this.getServerAssignmentCandidates(module.exports)) {
-            this.patchServerAssignmentTarget(target);
+            if (!this.isRunActive(run)) return;
+            this.patchServerAssignmentTarget(target, run);
         }
     }
 
@@ -950,46 +1200,65 @@ module.exports = class Experiments {
             || typeof target?.getServerAssignment === "function";
     }
 
-    patchServerAssignmentTarget(target) {
+    patchServerAssignmentTarget(target, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const patchTarget = typeof target?.prototype?.getServerAssignment === "function" ? target.prototype : target;
         if (!patchTarget || typeof patchTarget.getServerAssignment !== "function") return;
-        if (this.serverAssignmentTargets.has(patchTarget)) return;
+        if (run.serverAssignmentTargets.has(patchTarget)) return;
         if (!BdApi?.Patcher?.instead) return;
 
-        this.serverAssignmentTargets.add(patchTarget);
+        run.serverAssignmentTargets.add(patchTarget);
 
         BdApi.Patcher.instead(this.pluginName, patchTarget, "getServerAssignment", (thisObject, args, original) => {
+            if (!this.isRunActive(run)) return original.apply(thisObject, args);
             if (args?.[0] == null) return undefined;
             return original.apply(thisObject, args);
         });
     }
 
-    getLazyGuardSignal() {
-        if (!this.lazyGuardAbortController) this.lazyGuardAbortController = new AbortController();
-        return this.lazyGuardAbortController.signal;
+    getLazyGuardSignal(run = this.activeRun) {
+        return this.isRunActive(run) ? run.controller.signal : null;
     }
 
-    startStaffHelpClickBlocker() {
-        if (!this.settings[SETTING_TOOLBAR_DEV_MENU] || this.staffHelpClickBlockerActive) return;
+    startStaffHelpClickBlocker(run = this.activeRun) {
+        if (!this.isRunActive(run) || !this.settings[SETTING_TOOLBAR_DEV_MENU] || run.staffHelpClickBlockerActive) return;
+
+        const handler = event => this.handleStaffHelpInteraction(event, run);
 
         for (const eventName of this.staffHelpClickEvents) {
-            document.addEventListener(eventName, this.staffHelpClickHandler, true);
+            document.addEventListener(eventName, handler, true);
         }
 
+        if (!this.isRunActive(run)) {
+            for (const eventName of this.staffHelpClickEvents) {
+                document.removeEventListener(eventName, handler, true);
+            }
+            return;
+        }
+
+        run.staffHelpClickHandler = handler;
+        run.staffHelpClickBlockerActive = true;
+        this.staffHelpClickHandler = handler;
         this.staffHelpClickBlockerActive = true;
     }
 
-    stopStaffHelpClickBlocker() {
-        if (!this.staffHelpClickBlockerActive) return;
+    stopStaffHelpClickBlocker(run = this.activeRun) {
+        if (!run?.staffHelpClickBlockerActive) return;
 
         for (const eventName of this.staffHelpClickEvents) {
-            document.removeEventListener(eventName, this.staffHelpClickHandler, true);
+            document.removeEventListener(eventName, run.staffHelpClickHandler, true);
         }
 
-        this.staffHelpClickBlockerActive = false;
+        if (this.staffHelpClickHandler === run.staffHelpClickHandler) {
+            this.staffHelpClickHandler = null;
+            this.staffHelpClickBlockerActive = false;
+        }
+        run.staffHelpClickHandler = null;
+        run.staffHelpClickBlockerActive = false;
     }
 
-    handleStaffHelpInteraction(event) {
+    handleStaffHelpInteraction(event, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         if (!this.settings[SETTING_TOOLBAR_DEV_MENU]) return;
         if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
         if (!this.findStaffHelpTrigger(event.target)) return;
@@ -1020,61 +1289,87 @@ module.exports = class Experiments {
         return taggedNode ? interactive : null;
     }
 
-    ensureExperiments(reason) {
-        if (this.isEnsuring) return;
+    ensureExperiments(reason, run = this.activeRun) {
+        if (!this.isRunActive(run) || run.isEnsuring) return;
 
         try {
+            run.isEnsuring = true;
             this.isEnsuring = true;
-            const user = this.userStore?.getCurrentUser?.();
-            this.forceDeveloperUser(user);
+            const user = run.userStore?.getCurrentUser?.();
+            if (!this.isRunActive(run)) return;
+            this.forceDeveloperUser(user, run);
+            if (!this.isRunActive(run)) return;
 
-            const nodes = this.getDispatcherNodes();
+            const nodes = this.getDispatcherNodes(run);
             const experimentStore = nodes.find(node => node?.name === "ExperimentStore");
             const developerExperimentStore = nodes.find(node => node?.name === "DeveloperExperimentStore");
             const payload = {type: "user", user: this.createDeveloperUserPayload(user)};
 
             developerExperimentStore?.actionHandler?.CONNECTION_OPEN?.(payload);
+            if (!this.isRunActive(run)) return;
             experimentStore?.storeDidChange?.();
+            if (!this.isRunActive(run)) return;
             developerExperimentStore?.storeDidChange?.();
         }
         catch (error) {
             console.error(`[${this.pluginName}] Failed to ensure experiments (${reason}).`, error);
         }
         finally {
-            this.isEnsuring = false;
+            if (this.isRunActive(run)) {
+                run.isEnsuring = false;
+                this.isEnsuring = false;
+            }
         }
     }
 
-    queueEnsureExperiments() {
-        if (this.isEnsuring) return;
-        if (this.ensureQueued) return;
+    queueEnsureExperiments(run = this.activeRun) {
+        if (!this.isRunActive(run) || run.isEnsuring || run.ensureQueued) return;
 
+        run.ensureQueued = true;
         this.ensureQueued = true;
-        window.setTimeout(() => {
+        const timeout = window.setTimeout(() => {
+            if (run.ensureTimeout === timeout) {
+                run.ensureTimeout = null;
+                if (this.activeRun === run && this.ensureTimeout === timeout) this.ensureTimeout = null;
+            }
+            if (!this.isRunActive(run)) return;
+            run.ensureQueued = false;
             this.ensureQueued = false;
-            this.ensureExperiments("queued");
+            this.ensureExperiments("queued", run);
         }, 100);
+        run.ensureTimeout = timeout;
+        if (this.isRunActive(run)) this.ensureTimeout = timeout;
+        else window.clearTimeout(timeout);
     }
 
-    forceDeveloperPayload(args) {
-        if (!Array.isArray(args)) return;
+    forceDeveloperPayload(args, run = this.activeRun) {
+        if (!this.isRunActive(run) || !Array.isArray(args)) return;
 
         if (!args[0] || typeof args[0] !== "object") {
-            args[0] = {type: "user", user: this.createDeveloperUserPayload()};
+            const user = this.createDeveloperUserPayload();
+            if (!this.isRunActive(run)) return;
+            args[0] = {type: "user", user};
             return;
         }
 
-        if (!args[0].user || typeof args[0].user !== "object") {
-            args[0].user = this.createDeveloperUserPayload();
+        const payload = {...args[0]};
+        if (!payload.user || typeof payload.user !== "object") {
+            const user = this.createDeveloperUserPayload();
+            if (!this.isRunActive(run)) return;
+            payload.user = user;
+            args[0] = payload;
             return;
         }
 
-        if (typeof args[0].user.flags === "number") args[0].user.flags |= DEV_FLAG;
-        else args[0].user.flags = DEV_FLAG;
+        payload.user = {
+            ...payload.user,
+            flags: typeof payload.user.flags === "number" ? payload.user.flags | DEV_FLAG : DEV_FLAG
+        };
+        args[0] = payload;
     }
 
-    createDeveloperUserPayload(user = null) {
-        const currentUser = user || this.userStore?.getCurrentUser?.();
+    createDeveloperUserPayload(user = null, run = this.activeRun) {
+        const currentUser = user || (this.isRunActive(run) ? run.userStore?.getCurrentUser?.() : null);
         const flags = typeof currentUser?.flags === "number" ? currentUser.flags | DEV_FLAG : DEV_FLAG;
 
         return {
@@ -1083,39 +1378,43 @@ module.exports = class Experiments {
         };
     }
 
-    forceDeveloperUser(user) {
-        if (!user || typeof user !== "object") return;
+    trackOriginalFlags(user, run = this.activeRun) {
+        if (!this.isRunActive(run) || !user || typeof user !== "object" || run.originalFlags.has(user)) return;
+        run.originalFlags.set(user, typeof user.flags === "number" ? user.flags : null);
+    }
 
-        if (!this.originalFlags.has(user)) {
-            this.originalFlags.set(user, typeof user.flags === "number" ? user.flags : null);
-        }
+    forceDeveloperUser(user, run = this.activeRun) {
+        if (!this.isRunActive(run) || !user || typeof user !== "object") return;
+
+        this.trackOriginalFlags(user, run);
 
         if (typeof user.flags === "number") user.flags |= DEV_FLAG;
         else user.flags = DEV_FLAG;
 
-        this.forceBooleanGetter(user, "isDeveloper");
+        this.forceBooleanGetter(user, "isDeveloper", run);
     }
 
-    forceBooleanGetter(instance, property) {
+    forceBooleanGetter(instance, property, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const owner = Object.isExtensible(instance) ? instance : this.findPropertyOwner(instance, property);
         if (!owner) return;
 
         this.forceMember(owner, property, {
             configurable: true,
             get: () => true
-        });
+        }, run);
     }
 
-    forceMember(target, property, descriptor) {
-        if (!target || typeof target !== "object") return;
-        if (this.forcedMembers.some(record => record.target === target && record.property === property)) return;
+    forceMember(target, property, descriptor, run = this.activeRun) {
+        if (!this.isRunActive(run) || !target || typeof target !== "object") return;
+        if (run.forcedMembers.some(record => record.target === target && record.property === property)) return;
 
         const originalDescriptor = Object.getOwnPropertyDescriptor(target, property);
         if (originalDescriptor && !originalDescriptor.configurable) return;
 
         try {
             Object.defineProperty(target, property, descriptor);
-            this.forcedMembers.push({
+            run.forcedMembers.push({
                 target,
                 property,
                 hadOriginal: Boolean(originalDescriptor),
@@ -1138,8 +1437,8 @@ module.exports = class Experiments {
         return null;
     }
 
-    restoreForcedMembers() {
-        for (const record of this.forcedMembers.splice(0).reverse()) {
+    restoreForcedMembers(run) {
+        for (const record of run.forcedMembers.splice(0).reverse()) {
             try {
                 if (record.hadOriginal) {
                     Object.defineProperty(record.target, record.property, record.originalDescriptor);
@@ -1152,25 +1451,24 @@ module.exports = class Experiments {
         }
     }
 
-    restoreUserFlags() {
-        try {
-            const user = this.userStore?.getCurrentUser?.();
-            if (!user || !this.originalFlags.has(user)) return;
-
-            const originalFlagValue = this.originalFlags.get(user);
-            if (originalFlagValue === null) delete user.flags;
-            else user.flags = originalFlagValue;
+    restoreUserFlags(run) {
+        for (const [user, originalFlagValue] of run.originalFlags) {
+            try {
+                if (originalFlagValue === null) delete user.flags;
+                else user.flags = originalFlagValue;
+            }
+            catch {}
         }
-        catch {}
     }
 
-    flushExperimentStores() {
+    flushExperimentStores(run = this.activeRun, allowStopped = false) {
+        if (!allowStopped && !this.isRunActive(run)) return;
         try {
-            const nodes = this.getDispatcherNodes();
+            const nodes = this.getDispatcherNodes(run);
             const experimentStore = nodes.find(node => node?.name === "ExperimentStore");
             const developerExperimentStore = nodes.find(node => node?.name === "DeveloperExperimentStore");
-            const user = this.userStore?.getCurrentUser?.();
-            const originalFlags = user && this.originalFlags.has(user) ? this.originalFlags.get(user) : 0;
+            const user = run.userStore?.getCurrentUser?.();
+            const originalFlags = user && run.originalFlags.has(user) ? run.originalFlags.get(user) : 0;
             const payload = {type: "user", user: {...user, flags: originalFlags || 0}};
 
             developerExperimentStore?.actionHandler?.CONNECTION_OPEN?.(payload);
@@ -1180,19 +1478,19 @@ module.exports = class Experiments {
         catch {}
     }
 
-    getDispatcherNodes() {
-        const nodes = this.dispatcher?._actionHandlers?._dependencyGraph?.nodes;
+    getDispatcherNodes(run = this.activeRun) {
+        const nodes = run?.dispatcher?._actionHandlers?._dependencyGraph?.nodes;
         if (!nodes) return [];
         return Array.isArray(nodes) ? nodes : Object.values(nodes);
     }
 
-    getStore(name) {
+    getStore(name, run = this.activeRun) {
         try {
             if (BdApi?.Webpack?.getStore) return BdApi.Webpack.getStore(name);
         }
         catch {}
 
-        return this.getDispatcherNodes().find(node => node?.name === name);
+        return this.getDispatcherNodes(run).find(node => node?.name === name);
     }
 
     getWebpackModule(filter, options = {}) {
@@ -1209,19 +1507,45 @@ module.exports = class Experiments {
         return null;
     }
 
-    startDomObserver() {
-        this.observer = new MutationObserver(() => this.queueEnsureWarningCard());
-        this.observer.observe(document.body, {
+    startDomObserver(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
+
+        const observer = new MutationObserver(() => {
+            if (!this.isRunActive(run)) return;
+            this.queueEnsureWarningCard(run);
+        });
+        observer.observe(document.body, {
             childList: true,
             subtree: true
         });
+        if (!this.isRunActive(run)) {
+            observer.disconnect();
+            return;
+        }
+
+        run.observer = observer;
+        this.observer = observer;
     }
 
-    queueEnsureWarningCard() {
-        window.requestAnimationFrame(() => this.ensureWarningCard());
+    scheduleFrame(callback, run = this.activeRun) {
+        if (!this.isRunActive(run)) return null;
+
+        let frame = null;
+        frame = window.requestAnimationFrame(() => {
+            run.rafHandles.delete(frame);
+            if (!this.isRunActive(run)) return;
+            callback();
+        });
+        run.rafHandles.add(frame);
+        return frame;
     }
 
-    ensureWarningCard() {
+    queueEnsureWarningCard(run = this.activeRun) {
+        this.scheduleFrame(() => this.ensureWarningCard(run), run);
+    }
+
+    ensureWarningCard(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const searchInput = Array.from(document.querySelectorAll("input")).find(input => {
             return input.placeholder === "Search experiments" || input.getAttribute("aria-label") === "Search experiments";
         });
@@ -1233,7 +1557,7 @@ module.exports = class Experiments {
 
         const existingCard = document.getElementById(this.warningId);
         if (existingCard) {
-            this.updateWarningCardScrollSpacing(existingCard);
+            this.updateWarningCardScrollSpacing(existingCard, run);
             return;
         }
 
@@ -1252,7 +1576,7 @@ module.exports = class Experiments {
         `;
 
         container.insertBefore(card, container.firstElementChild);
-        this.updateWarningCardScrollSpacing(card);
+        this.updateWarningCardScrollSpacing(card, run);
     }
 
     findWarningContainer(searchInput) {
@@ -1275,11 +1599,12 @@ module.exports = class Experiments {
         }
     }
 
-    updateWarningCardScrollSpacing(card) {
+    updateWarningCardScrollSpacing(card, run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const host = this.findScrollableAncestor(card);
         if (!host) return;
 
-        window.requestAnimationFrame(() => {
+        this.scheduleFrame(() => {
             const height = Math.ceil(card.getBoundingClientRect().height || 0);
             if (!height) return;
 
@@ -1291,7 +1616,7 @@ module.exports = class Experiments {
 
             host.classList.add("bd-experiments-warning-scroll-host");
             host.style.setProperty("--bd-experiments-warning-scroll-offset", `${height + 16}px`);
-        });
+        }, run);
     }
 
     findScrollableAncestor(node) {
@@ -1307,7 +1632,8 @@ module.exports = class Experiments {
         return null;
     }
 
-    injectStyles() {
+    injectStyles(run = this.activeRun) {
+        if (!this.isRunActive(run)) return;
         const css = `
             #staff-help-popout-staff-help-bug-reporter {
                 ${this.settings[SETTING_TOOLBAR_DEV_MENU] ? "display: none !important;" : ""}
