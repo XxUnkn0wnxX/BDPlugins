@@ -71,6 +71,7 @@ module.exports = class Experiments {
 
         const run = this.createRun();
         try {
+            this.installMetadataLogFilter(run);
             this.settings = this.loadSettings();
             this.showChangelogIfNeeded();
             this.injectStyles(run);
@@ -97,6 +98,8 @@ module.exports = class Experiments {
     createRun() {
         const run = {
             controller: new AbortController(),
+            metadataLogFilter: null,
+            suppressedMetadata403: 0,
             serverAssignmentTargets: new WeakSet(),
             bugReporterStores: new WeakSet(),
             experimentUrlHelperModules: new WeakSet(),
@@ -158,6 +161,7 @@ module.exports = class Experiments {
             this.activeRun = null;
             this.isRunning = false;
             run.controller.abort();
+            this.restoreMetadataLogFilter(run);
 
             if (this.lazyGuardAbortController === run.controller) this.lazyGuardAbortController = null;
 
@@ -219,6 +223,56 @@ module.exports = class Experiments {
         }
         finally {
             if (this.stoppingRun === run) this.stoppingRun = null;
+        }
+    }
+
+    installMetadataLogFilter(run = this.activeRun) {
+        if (!run || run.metadataLogFilter || !this.isRunActive(run)) return;
+
+        try {
+            if (typeof window?.console?.log !== "function") return;
+
+            const original = window.console.log;
+            const plugin = this;
+            // Outer wrapper needed because the BD debug logger's after hook still runs for Patcher.instead.
+            const wrapper = function (...args) {
+                if (plugin.isRunActive(run)
+                    && args.length === 1
+                    && args[0] != null
+                    && typeof args[0] === "object"
+                ) {
+                    try {
+                        const metadataError = args[0];
+                        if (metadataError.name === "HTTPResponseError"
+                            && metadataError.message === "GET /apex/experiments/metadata [403]"
+                        ) {
+                            run.suppressedMetadata403 += 1;
+                            return;
+                        }
+                    }
+                    catch {
+                        // Ignore predicate failures and fall through to original logging.
+                    }
+                }
+                return original.apply(this, args);
+            };
+            window.console.log = wrapper;
+
+            run.metadataLogFilter = {target: window.console, original, wrapper};
+        }
+        catch {}
+    }
+
+    restoreMetadataLogFilter(run = this.activeRun) {
+        try {
+            const record = run && run.metadataLogFilter;
+            if (record?.target && record?.wrapper && record?.target.log === record.wrapper) {
+                record.target.log = record.original;
+            }
+        }
+        catch {}
+        finally {
+            if (run) run.metadataLogFilter = null;
         }
     }
 
