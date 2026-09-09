@@ -262,6 +262,8 @@ async function settle() {
 const PLAYGROUND_COMPONENT_SOURCE = "function PlaygroundEmbed(){(0,configs.useComponentPlaygroundConfigs) ( ); PlaygroundStore.setState({});}";
 const PLAYGROUND_REGISTRY_SOURCE = "function useComponentPlaygroundConfigs(){return []; }";
 const DEV_LINK_RULE_FACTORY_SOURCE = "function createRules(){return {devLink:{match:(url,context)=>context.allowDevLinks ? null : null,parse:(url,context)=>({target:url,type : 'devLink'}),react(){}}};}";
+const PLAYGROUND_LOADER_SOURCE = "()=>Promise.all([n.e(\"503634\"),n.e(\"761764\"),n.e(\"218126\"),n.e(\"467696\")]).then(n.bind(n,881267)).then(e=>({default:e.PlaygroundEmbed}))";
+const PLAYGROUND_LOADER_CANONICAL_SOURCE = "()=>Promise.all([n.e(\"503634\"),n.e(\"761764\"),n.e(\"218126\"),n.e(\"467696\")]).then(n.bind(n,881267))";
 
 function withFunctionSource(value, source) {
     Object.defineProperty(value, "toString", {
@@ -280,6 +282,51 @@ function rawModule(harness, id, exports, source) {
 
 function findMatchingWait(waits, module) {
     return waits.find(wait => wait.filter(module.exports, module, module.id));
+}
+
+function installReactHarness(loadEntry = async () => null) {
+    const lazyFactories = [];
+    const React = {
+        Component: class Component {},
+        createElement(type, config, ...children) {
+            const props = {...config};
+            const key = config?.key ?? null;
+            const ref = config?.ref ?? null;
+            delete props.key;
+            if (children.length === 1) props.children = children[0];
+            else if (children.length > 1) props.children = children;
+            return {$$typeof: Symbol.for("react.element"), type, key, ref, props};
+        },
+        cloneElement(element, config, ...children) {
+            const props = {...element.props, ...config};
+            const key = config?.key ?? element.key;
+            // React 19 cloneElement carries ref through props without reading element.ref.
+            const ref = props.ref ?? null;
+            delete props.key;
+            if (children.length === 1) props.children = children[0];
+            else if (children.length > 1) props.children = children;
+            return {$$typeof: Symbol.for("react.element"), type: element.type, key, ref, props};
+        },
+        isValidElement(value) {
+            return value?.$$typeof === Symbol.for("react.element");
+        },
+        lazy(factory) {
+            const lazyType = {$$typeof: Symbol.for("react.lazy"), _factory: factory};
+            lazyFactories.push(lazyType);
+            return lazyType;
+        }
+    };
+
+    global.BdApi.React = React;
+    global.BdApi.Utils = {loadEntry};
+    return {React, lazyFactories};
+}
+
+function playgroundLazy(loader, status = -1, result = loader) {
+    return {
+        $$typeof: Symbol.for("react.lazy"),
+        _payload: {_status: status, _result: result}
+    };
 }
 
 test("same instance can restart with fresh patches and restored state", () => {
@@ -554,182 +601,332 @@ test("stale timer, observer, and frame callbacks leave a restarted run untouched
     plugin.stop();
 });
 
-test("lazy payload cleanup restores only plugin-owned loader and module values", async () => {
+test("playground entry source parsing accepts native aliases and rejects unsafe loader shapes", () => {
     const {plugin} = startPlugin();
-    const rawModule = {default() { return "raw"; }};
-    function PlaygroundEmbedLoader() {
-        return rawModule;
+    const loader = withFunctionSource(function nativeLoader() {}, PLAYGROUND_LOADER_SOURCE);
+    assert.equal(plugin.getPlaygroundEntryLoaderSource(loader), PLAYGROUND_LOADER_CANONICAL_SOURCE);
+
+    const aliasedSource = "() => Promise . all ( [ $webpack . e ( \"503634\" ) , $webpack . e ( \"761764\" ) ] ) . then ( $webpack . bind ( $webpack , 881267 ) ) . then ( $row$ => ( { default : $row$ . $playground } ) )";
+    assert.equal(
+        plugin.getPlaygroundEntryLoaderSource(withFunctionSource(function aliasedLoader() {}, aliasedSource)),
+        "()=>Promise.all([n.e(\"503634\"),n.e(\"761764\")]).then(n.bind(n,881267))"
+    );
+
+    const invalidSources = [
+        PLAYGROUND_LOADER_SOURCE.replace('n.e("761764")', 'other.e("761764")'),
+        PLAYGROUND_LOADER_SOURCE.replace('.then(e=>({default:e.PlaygroundEmbed}))', '.then(e=>({default:e.PlaygroundEmbed})).then(n.bind(n,1))'),
+        PLAYGROUND_LOADER_SOURCE.replace('n.e("503634")', 'n.e(chunkId)'),
+        PLAYGROUND_LOADER_SOURCE.replace('"503634"', '"503 634"'),
+        PLAYGROUND_LOADER_SOURCE.replace('"503634"', '"50\\u0033"'),
+        PLAYGROUND_LOADER_SOURCE.replace('"503634"', "'503634'"),
+        `(${PLAYGROUND_LOADER_SOURCE});extra`
+    ];
+    for (const source of invalidSources) {
+        assert.equal(plugin.getPlaygroundEntryLoaderSource(withFunctionSource(function invalidLoader() {}, source)), null, source);
     }
-    const payload = {_status: -1, _result: PlaygroundEmbedLoader};
-
-    plugin.patchPlaygroundLazyType({_payload: payload});
-    const installedLoader = payload._result;
     plugin.stop();
-    assert.equal(payload._result, PlaygroundEmbedLoader);
-
-    plugin.start();
-    payload._result = PlaygroundEmbedLoader;
-    payload._status = -1;
-    plugin.patchPlaygroundLazyType({_payload: payload});
-    const wrappedModule = payload._result();
-    payload._result = wrappedModule;
-    plugin.stop();
-    assert.equal(payload._result, rawModule);
-
-    plugin.start();
-    let resolvePending;
-    function PlaygroundEmbedPendingLoader() {
-        return new Promise(resolve => {
-            resolvePending = resolve;
-        });
-    }
-    const pendingPayload = {_status: -1, _result: PlaygroundEmbedPendingLoader};
-    plugin.patchPlaygroundLazyType({_payload: pendingPayload});
-    const wrappedPending = pendingPayload._result();
-    const reactPending = new Promise(() => {});
-    pendingPayload._result = reactPending;
-    pendingPayload._status = 0;
-    plugin.stop();
-    assert.equal(pendingPayload._result, reactPending);
-    resolvePending(rawModule);
-    assert.equal(await wrappedPending, rawModule);
-
-    plugin.start();
-    const rejection = new Error("expected rejection");
-    function PlaygroundEmbedRejectedLoader() {
-        return Promise.reject(rejection);
-    }
-    const rejectedPayload = {_status: -1, _result: PlaygroundEmbedRejectedLoader};
-    plugin.patchPlaygroundLazyType({_payload: rejectedPayload});
-    const wrappedRejected = rejectedPayload._result();
-    const reactRejection = Promise.reject(rejection);
-    reactRejection.catch(() => {});
-    rejectedPayload._result = reactRejection;
-    rejectedPayload._status = 2;
-    plugin.stop();
-    assert.equal(rejectedPayload._result, reactRejection);
-    await assert.rejects(wrappedRejected, rejection);
-
-    assert.notEqual(installedLoader, PlaygroundEmbedLoader);
 });
 
-test("a recognized cached lazy payload is rewrapped on the next run without source matching its cached default", () => {
+test("playground lazy loading uses one public request and preserves native state", async () => {
     const {harness, plugin} = startPlugin();
-    function CachedComponent() {
-        return harness.user.isStaff();
-    }
-    const rawModule = {default: CachedComponent};
-    function PlaygroundEmbedLoader() {
-        return rawModule;
-    }
-    const lazyType = {_payload: {_status: -1, _result: PlaygroundEmbedLoader}};
+    const loadCalls = [];
+    let nativeLoaderCalls = 0;
+    const componentCalls = [];
+    const receiver = {name: "component receiver"};
+    const result = {name: "component result"};
+    const component = withFunctionSource(function PlaygroundEmbed(...args) {
+        componentCalls.push({receiver: this, args, staff: harness.user.isStaff(), personal: harness.user.isStaffPersonal()});
+        if (args[0] === "throw") throw new Error("render failed");
+        return result;
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const frozenExports = Object.freeze({renamedExport: component});
+    const loader = withFunctionSource(function nativeLoader() {
+        nativeLoaderCalls++;
+        return Promise.reject(new Error("native loader must stay untouched"));
+    }, PLAYGROUND_LOADER_SOURCE);
+    const payload = Object.freeze({_status: -1, _result: loader});
+    const lazyType = {$$typeof: Symbol.for("react.lazy"), _payload: payload};
+    const {lazyFactories} = installReactHarness(function loadEntry(source) {
+        loadCalls.push({receiver: this, source});
+        return Promise.resolve([frozenExports]);
+    });
 
-    assert.equal(plugin.functionSource(rawModule.default).includes("PlaygroundEmbed"), false);
-    plugin.patchPlaygroundLazyType(lazyType);
-    const firstRunModule = lazyType._payload._result();
-    lazyType._payload._result = firstRunModule;
-    lazyType._payload._status = 1;
+    const replacement = plugin.getPlaygroundLazyComponentType(lazyType);
+    assert.notEqual(replacement, lazyType);
+    assert.equal(plugin.getPlaygroundLazyComponentType(lazyType), replacement);
+    assert.equal(lazyFactories.length, 1);
+    assert.equal(loadCalls.length, 0);
+    assert.equal(nativeLoaderCalls, 0);
+    assert.equal(payload._result, loader);
+
+    const [firstModule, secondModule] = await Promise.all([replacement._factory(), replacement._factory()]);
+    assert.equal(loadCalls.length, 1);
+    assert.equal(loadCalls[0].receiver, BdApi.Utils);
+    assert.equal(loadCalls[0].source, PLAYGROUND_LOADER_CANONICAL_SOURCE);
+    assert.equal(firstModule.default, secondModule.default);
+    assert.equal(firstModule.default.call(receiver, "first"), result);
+    assert.deepEqual(componentCalls.at(-1), {receiver, args: ["first"], staff: true, personal: true});
+    assert.equal(harness.user.isStaff(), false);
+    assert.equal(harness.user.isStaffPersonal(), false);
+    assert.throws(() => firstModule.default.call(receiver, "throw"), /render failed/);
+    assert.equal(harness.user.isStaff(), false);
+    assert.equal(harness.user.isStaffPersonal(), false);
+
     plugin.stop();
-    assert.equal(lazyType._payload._result, rawModule);
+    assert.equal(firstModule.default.call(receiver, "after-stop"), result);
+    assert.deepEqual(componentCalls.at(-1), {receiver, args: ["after-stop"], staff: false, personal: false});
+    assert.equal(harness.user.isStaff(), false);
+});
 
-    plugin.start();
-    const pendingModule = {default: CachedComponent};
-    lazyType._payload._status = 0;
-    lazyType._payload._result = pendingModule;
-    plugin.patchPlaygroundLazyType(lazyType);
-    assert.equal(lazyType._payload._result, pendingModule);
+test("resolved semantic lazy payloads wrap directly while foreign states stay untouched", () => {
+    const {harness, plugin} = startPlugin();
+    const component = withFunctionSource(function PlaygroundEmbed(...args) {
+        return {receiver: this, args, staff: harness.user.isStaff()};
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const resolvedModule = Object.freeze({default: component});
+    const resolvedPayload = Object.freeze({_status: 1, _result: resolvedModule});
+    const resolvedLazy = {$$typeof: Symbol.for("react.lazy"), _payload: resolvedPayload};
 
-    const rejectedModule = {default: CachedComponent};
-    lazyType._payload._status = 2;
-    lazyType._payload._result = rejectedModule;
-    plugin.patchPlaygroundLazyType(lazyType);
-    assert.equal(lazyType._payload._result, rejectedModule);
+    const wrapped = plugin.getPlaygroundLazyComponentType(resolvedLazy);
+    assert.notEqual(wrapped, resolvedLazy);
+    assert.equal(wrapped.call(harness.user, "resolved").staff, true);
+    assert.equal(harness.user.isStaff(), false);
+    assert.equal(resolvedPayload._result, resolvedModule);
 
-    const unknownModule = {default: CachedComponent};
-    lazyType._payload._status = 99;
-    lazyType._payload._result = unknownModule;
-    plugin.patchPlaygroundLazyType(lazyType);
-    assert.equal(lazyType._payload._result, unknownModule);
+    const unchanged = [
+        playgroundLazy(null, 0, {default: component}),
+        playgroundLazy(null, 2, {default: component}),
+        playgroundLazy(null, 99, {default: component}),
+        playgroundLazy(null, 1, {default() { return "foreign"; }}),
+        playgroundLazy(null, 1, {default: "not callable"}),
+        playgroundLazy(null, 1, (() => {
+            const value = {};
+            Object.defineProperty(value, "default", {get() { throw new Error("foreign getter"); }});
+            return value;
+        })())
+    ];
+    for (const lazyType of unchanged) assert.equal(plugin.getPlaygroundLazyComponentType(lazyType), lazyType);
 
-    const foreignModule = {default: CachedComponent};
-    const racedModule = {};
-    Object.defineProperty(racedModule, "default", {
+    const foreignModule = {default: function foreign() {}};
+    const racedPayload = {_status: 1, _result: {}};
+    Object.defineProperty(racedPayload._result, "default", {
         get() {
-            lazyType._payload._result = foreignModule;
-            return CachedComponent;
+            racedPayload._result = foreignModule;
+            return component;
         }
     });
-    lazyType._payload._status = 1;
-    lazyType._payload._result = racedModule;
-    plugin.patchPlaygroundLazyType(lazyType);
-    assert.equal(lazyType._payload._result, foreignModule);
-
-    lazyType._payload._status = 1;
-    lazyType._payload._result = rawModule;
-    plugin.patchPlaygroundLazyType(lazyType);
-    assert.notEqual(lazyType._payload._result, rawModule);
-    assert.equal(lazyType._payload._result.default(), true);
-    plugin.stop();
-    assert.equal(lazyType._payload._result, rawModule);
-    assert.equal(rawModule.default(), false);
-});
-
-test("lazy aliases share one cleanup record and known payloads do not authorize replaced loaders", () => {
-    const {plugin} = startPlugin();
-    const rawModule = {default() { return "raw"; }};
-    function PlaygroundEmbedLoader() {
-        return rawModule;
-    }
-    const payload = {_status: -1, _result: PlaygroundEmbedLoader};
-    const firstAlias = {_payload: payload};
-    const secondAlias = {_payload: payload};
-
-    plugin.patchPlaygroundLazyType(firstAlias);
-    const installedLoader = payload._result;
-    plugin.patchPlaygroundLazyType(secondAlias);
-    assert.equal(payload._result, installedLoader);
-    plugin.stop();
-    assert.equal(payload._result, PlaygroundEmbedLoader);
-
-    plugin.start();
-    function UnrelatedLoader() {
-        return rawModule;
-    }
-    payload._status = -1;
-    payload._result = UnrelatedLoader;
-    plugin.patchPlaygroundLazyType(firstAlias);
-    assert.equal(payload._result, UnrelatedLoader);
-
-    function PlaygroundEmbedRejectedLoader() {
-        return rawModule;
-    }
-    payload._status = 2;
-    payload._result = PlaygroundEmbedRejectedLoader;
-    plugin.patchPlaygroundLazyType(firstAlias);
-    assert.equal(payload._result, PlaygroundEmbedRejectedLoader);
+    const racedLazy = {$$typeof: Symbol.for("react.lazy"), _payload: racedPayload};
+    assert.equal(plugin.getPlaygroundLazyComponentType(racedLazy), racedLazy);
+    assert.equal(racedPayload._result, foreignModule);
     plugin.stop();
 });
 
-test("resolved lazy cleanup preserves a foreign null result", () => {
+test("lazy replacement cache revalidates payload and loader identity", () => {
     const {plugin} = startPlugin();
-    const rawModule = {default() { return "raw"; }};
-    function PlaygroundEmbedLoader() {
-        return rawModule;
-    }
-    const lazyType = {_payload: {_status: -1, _result: PlaygroundEmbedLoader}};
+    installReactHarness();
+    const loaderOne = withFunctionSource(function loaderOne() {}, PLAYGROUND_LOADER_SOURCE);
+    const loaderTwo = withFunctionSource(function loaderTwo() {}, PLAYGROUND_LOADER_SOURCE);
+    const payload = {_status: -1, _result: loaderOne};
+    const lazyType = {$$typeof: Symbol.for("react.lazy"), _payload: payload};
 
-    plugin.patchPlaygroundLazyType(lazyType);
-    lazyType._payload._result = lazyType._payload._result();
-    lazyType._payload._status = 1;
+    const first = plugin.getPlaygroundLazyComponentType(lazyType);
+    assert.equal(plugin.getPlaygroundLazyComponentType(lazyType), first);
+
+    const foreignLoader = withFunctionSource(function foreignLoader() {}, "() => Promise.resolve(null)");
+    payload._result = foreignLoader;
+    assert.equal(plugin.getPlaygroundLazyComponentType(lazyType), lazyType);
+
+    payload._result = loaderTwo;
+    const second = plugin.getPlaygroundLazyComponentType(lazyType);
+    assert.notEqual(second, first);
+    assert.equal(plugin.getPlaygroundLazyComponentType(lazyType), second);
+
+    const racedPayload = {_status: -1};
+    const racedLazy = {$$typeof: Symbol.for("react.lazy"), _payload: racedPayload};
+    const racedLoader = withFunctionSource(function racedLoader() {}, PLAYGROUND_LOADER_SOURCE);
+    Object.defineProperty(racedLoader, "toString", {
+        configurable: true,
+        value() {
+            racedPayload._result = foreignLoader;
+            return PLAYGROUND_LOADER_SOURCE;
+        }
+    });
+    racedPayload._result = racedLoader;
+    assert.equal(plugin.getPlaygroundLazyComponentType(racedLazy), racedLazy);
+    assert.equal(racedPayload._result, foreignLoader);
     plugin.stop();
-    assert.equal(lazyType._payload._result, rawModule);
+});
+
+test("malformed public entry results fall back without throwing or patching", async () => {
+    const invalidResults = [
+        ["null", () => null],
+        ["empty", () => []],
+        ["multiple modules", () => [{default() {}}, {default() {}}]],
+        ["missing target", () => [{unrelated() {}}]],
+        ["ambiguous targets", () => [{first: withFunctionSource(function first() {}, PLAYGROUND_COMPONENT_SOURCE), second: withFunctionSource(function second() {}, PLAYGROUND_COMPONENT_SOURCE)}]],
+        ["throwing getter", () => {
+            const exports = {};
+            Object.defineProperty(exports, "throwing", {enumerable: true, get() { throw new Error("getter"); }});
+            return [exports];
+        }],
+        ["rejection", () => Promise.reject(new Error("entry failed"))],
+        ["sync throw", () => { throw new Error("entry failed synchronously"); }]
+    ];
+
+    for (const [name, value] of invalidResults) {
+        const {plugin} = startPlugin();
+        const calls = [];
+        installReactHarness(function loadEntry(source) {
+            calls.push({receiver: this, source});
+            return value();
+        });
+        assert.equal(await plugin.loadPlaygroundEntry(`invalid-${name}`), null, name);
+        assert.equal(calls.length, 1, name);
+        plugin.stop();
+    }
+
+    const {plugin} = startPlugin();
+    installReactHarness();
+    const unavailableLazy = playgroundLazy(withFunctionSource(function unavailableLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    delete BdApi.React;
+    assert.equal(plugin.getPlaygroundLazyComponentType(unavailableLazy), unavailableLazy);
+    installReactHarness();
+    delete BdApi.Utils;
+    assert.equal(plugin.getPlaygroundLazyComponentType(unavailableLazy), unavailableLazy);
+    assert.equal(await plugin.loadPlaygroundEntry("missing-api"), null);
+    plugin.stop();
+});
+
+test("nested playground traversal preserves props and avoids native loader calls", () => {
+    const {plugin} = startPlugin();
+    let nativeLoaderCalls = 0;
+    const loader = withFunctionSource(function nativeLoader() {
+        nativeLoaderCalls++;
+        return null;
+    }, PLAYGROUND_LOADER_SOURCE);
+    const payload = {_status: -1, _result: loader};
+    const lazyType = {$$typeof: Symbol.for("react.lazy"), _payload: payload};
+    const unrelatedLazy = {$$typeof: Symbol.for("react.lazy"), _payload: {_status: -1, _result: loader}};
+    const {React} = installReactHarness();
+    const url = "dev://playground/example";
+    const target = React.createElement(lazyType, {url, key: "target-key", ref: "target-ref", data: "keep"});
+    target.props.ref = "modern-target-ref";
+    const foreign = React.createElement(unrelatedLazy, {url: "dev://playground/other", key: "foreign-key"});
+    const root = React.createElement("section", {className: "root", key: "root-key", ref: "root-ref"}, [target, foreign, "text"]);
+    root.props.ref = "modern-root-ref";
+    let refReads = 0;
+    Object.defineProperty(root, "ref", {
+        configurable: true,
+        get() {
+            refReads++;
+            throw new Error("React 19 ref getter must not be read");
+        }
+    });
+
+    const wrapped = plugin.wrapPlaygroundLazyElements(root, url);
+    assert.notEqual(wrapped, root);
+    assert.equal(wrapped.type, "section");
+    assert.equal(wrapped.key, "root-key");
+    assert.equal(wrapped.props.className, "root");
+    assert.equal(wrapped.props.ref, "modern-root-ref");
+    assert.equal(refReads, 0);
+    assert.equal(nativeLoaderCalls, 0);
+    assert.equal(payload._result, loader);
+
+    const children = wrapped.props.children;
+    assert.equal(children.length, 3);
+    assert.notEqual(children[0].type, lazyType);
+    assert.equal(children[0].key, "target-key");
+    assert.equal(children[0].props.url, url);
+    assert.equal(children[0].props.data, "keep");
+    assert.equal(children[0].props.ref, "modern-target-ref");
+    assert.equal(children[1], foreign);
+    assert.equal(children[2], "text");
+    assert.equal(plugin.wrapPlaygroundLazyElements(wrapped, url), wrapped);
+    plugin.stop();
+});
+
+test("stopped runs cannot invoke or consume public playground loads", async () => {
+    const harness = createHarness();
+    const plugin = new Experiments({name: "Experiments", version: "1.6.2"});
+    plugin.start();
+    const component = withFunctionSource(function PlaygroundEmbed() {
+        return harness.user.isStaff();
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const modules = Object.freeze({renamed: component});
+    const calls = [];
+    const resolvers = [];
+    installReactHarness(function loadEntry(source) {
+        calls.push({receiver: this, source});
+        return new Promise(resolve => resolvers.push(resolve));
+    });
+
+    const firstLazy = playgroundLazy(withFunctionSource(function firstLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    const firstReplacement = plugin.getPlaygroundLazyComponentType(firstLazy);
+    const firstBeforeStop = firstReplacement._factory();
+    await settle();
+    assert.equal(calls.length, 1);
+    resolvers[0]([modules]);
+    const firstResolved = await firstBeforeStop;
+    assert.equal(firstResolved.default.call(harness.user), true);
+    plugin.stop();
+    assert.equal(harness.user.isStaff(), false);
 
     plugin.start();
-    plugin.patchPlaygroundLazyType(lazyType);
-    lazyType._payload._status = 2;
-    lazyType._payload._result = null;
+    const stopBeforeCallLazy = playgroundLazy(withFunctionSource(function queuedLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    const stopBeforeCallReplacement = plugin.getPlaygroundLazyComponentType(stopBeforeCallLazy);
+    const stopBeforeCall = stopBeforeCallReplacement._factory();
     plugin.stop();
-    assert.equal(lazyType._payload._result, null);
+    const stoppedModule = await stopBeforeCall;
+    assert.equal(calls.length, 1);
+    const stoppedProps = {url: "dev://playground/mana", marker: "queued"};
+    const stoppedElement = stoppedModule.default(stoppedProps);
+    assert.equal(stoppedElement.type, stopBeforeCallLazy);
+    assert.deepEqual(stoppedElement.props, stoppedProps);
+
+    plugin.start();
+    const successorLazy = playgroundLazy(withFunctionSource(function successorLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    const successorReplacement = plugin.getPlaygroundLazyComponentType(successorLazy);
+    const successorLoad = successorReplacement._factory();
+    await settle();
+    assert.equal(calls.length, 2);
+    plugin.stop();
+    plugin.start();
+    resolvers[1]([modules]);
+    const staleModule = await successorLoad;
+    assert.equal(staleModule.default({url: "dev://playground/mana"}).type, successorLazy);
+    assert.equal(firstResolved.default.call(harness.user), false);
+
+    const currentLazy = playgroundLazy(withFunctionSource(function currentLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    const currentReplacement = plugin.getPlaygroundLazyComponentType(currentLazy);
+    const currentLoad = currentReplacement._factory();
+    await settle();
+    assert.equal(calls.length, 3);
+    resolvers[2]([modules]);
+    const currentModule = await currentLoad;
+    assert.equal(currentModule.default.call(harness.user), true);
+    assert.equal(harness.user.isStaff(), false);
+    plugin.stop();
+});
+
+test("reentrant public loader stop leaves no stale result or staff patch", async () => {
+    const {harness, plugin} = startPlugin();
+    const component = withFunctionSource(function PlaygroundEmbed() {
+        return harness.user.isStaff();
+    }, PLAYGROUND_COMPONENT_SOURCE);
+    const calls = [];
+    installReactHarness(function loadEntry(source) {
+        calls.push({receiver: this, source});
+        plugin.stop();
+        return Promise.resolve([{renamed: component}]);
+    });
+    const lazyType = playgroundLazy(withFunctionSource(function reentrantLoader() {}, PLAYGROUND_LOADER_SOURCE));
+    const replacement = plugin.getPlaygroundLazyComponentType(lazyType);
+    const loaded = await replacement._factory();
+    assert.equal(calls.length, 1);
+    assert.equal(plugin.isRunning, false);
+    assert.equal(loaded.default({url: "dev://playground/mana"}).type, lazyType);
+    assert.equal(harness.user.isStaff(), false);
 });
 
 test("old staff wrappers delegate natively and temporary staff methods always restore", () => {

@@ -43,8 +43,6 @@ module.exports = class Experiments {
         this.experimentUrlHelperModules = null;
         this.playgroundEmbedModules = null;
         this.playgroundLazyTypes = null;
-        // Recognition survives stop; patch ownership remains scoped to each run.
-        this.knownPlaygroundLazyPayloads = new WeakSet();
         this.staffWrappedComponentTypes = null;
         this.devLinkRuleFactories = null;
         this.devLinkRuleTargets = null;
@@ -104,13 +102,14 @@ module.exports = class Experiments {
             bugReporterStores: new WeakSet(),
             experimentUrlHelperModules: new WeakSet(),
             playgroundEmbedModules: new WeakSet(),
-            playgroundLazyTypes: new WeakSet(),
+            playgroundLazyTypes: new WeakMap(),
+            playgroundLazyStates: new WeakMap(),
+            playgroundEntryLoads: new Map(),
             staffWrappedComponentTypes: new WeakMap(),
             devLinkRuleFactories: new WeakSet(),
             devLinkRuleTargets: new WeakSet(),
             originalFlags: new Map(),
             forcedMembers: [],
-            lazyPayloads: new Map(),
             rafHandles: new Set(),
             userStore: null,
             dispatcher: null,
@@ -196,7 +195,7 @@ module.exports = class Experiments {
             }
             catch {}
 
-            this.restoreLazyPayloads(run);
+            run.playgroundEntryLoads.clear();
             this.restoreForcedMembers(run);
             this.restoreUserFlags(run);
             this.flushExperimentStores(run, true);
@@ -1105,7 +1104,9 @@ module.exports = class Experiments {
             try {
                 const element = original.apply(thisObject, args);
                 if (!this.isRunActive(run)) return element;
-                if (this.isPlaygroundDevLink(url)) this.patchPlaygroundLazyTypes(element, run);
+                if (this.isPlaygroundDevLink(url)) {
+                    return this.wrapDevLinkElement(this.wrapPlaygroundLazyElements(element, url, run), url, run);
+                }
                 return this.wrapDevLinkElement(element, url, run);
             }
             catch (error) {
@@ -1148,19 +1149,79 @@ module.exports = class Experiments {
         if (!React?.isValidElement?.(element)) return element;
 
         const children = element.props?.children;
-        const wrappedChildren = Array.isArray(children)
+        let wrappedChildren = Array.isArray(children)
             ? children.map(child => this.wrapStaffGatedElement(child, run))
             : this.wrapStaffGatedElement(children, run);
+        if (Array.isArray(children) && wrappedChildren.every((child, index) => child === children[index])) wrappedChildren = children;
         const hasWrappedChildren = wrappedChildren !== children;
         const wrappedType = typeof element.type === "function" ? this.getStaffWrappedComponentType(element.type, run) : element.type;
 
         if (wrappedType === element.type && !hasWrappedChildren) return element;
 
-        return React.createElement(wrappedType, {
-            ...element.props,
-            key: element.key,
-            ref: element.ref
-        }, wrappedChildren);
+        return this.createElementLike(element, wrappedType, wrappedChildren, React);
+    }
+
+    wrapPlaygroundLazyElements(element, url, run = this.activeRun) {
+        if (!this.isRunActive(run) || !this.isPlaygroundDevLink(url)) return element;
+        const React = BdApi?.React;
+        if (!React?.isValidElement?.(element)) return element;
+
+        const children = element.props?.children;
+        let wrappedChildren = Array.isArray(children)
+            ? children.map(child => this.wrapPlaygroundLazyElements(child, url, run))
+            : this.wrapPlaygroundLazyElements(children, url, run);
+        if (Array.isArray(children) && wrappedChildren.every((child, index) => child === children[index])) wrappedChildren = children;
+        const hasWrappedChildren = wrappedChildren !== children;
+
+        let wrappedType = element.type;
+        try {
+            if (element.props?.url === url) wrappedType = this.getPlaygroundLazyComponentType(element.type, run);
+        }
+        catch {}
+
+        if (wrappedType === element.type && !hasWrappedChildren) return element;
+        return this.createElementLike(element, wrappedType, wrappedChildren, React);
+    }
+
+    createElementLike(element, type, children, React = BdApi?.React) {
+        if (!React?.createElement) return element;
+
+        if (type === element.type && typeof React.cloneElement === "function") {
+            try {
+                return React.cloneElement(element, {}, children);
+            }
+            catch {}
+        }
+
+        let props;
+        try {
+            props = {...element.props};
+        }
+        catch {
+            return element;
+        }
+
+        const key = this.getReactElementOwnValue(element, "key");
+        if (key !== undefined) props.key = key;
+
+        // React 19 warns when element.ref is read. The prop carries modern refs;
+        // only use an old element's own data descriptor as a compatibility fallback.
+        if (!Object.hasOwn(props, "ref")) {
+            const ref = this.getReactElementOwnValue(element, "ref");
+            if (ref !== undefined) props.ref = ref;
+        }
+
+        return React.createElement(type, props, children);
+    }
+
+    getReactElementOwnValue(element, property) {
+        try {
+            const descriptor = Object.getOwnPropertyDescriptor(element, property);
+            return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+        }
+        catch {
+            return undefined;
+        }
     }
 
     getStaffWrappedComponentType(type, run = this.activeRun) {
@@ -1175,6 +1236,7 @@ module.exports = class Experiments {
 
         WrappedComponent.displayName = `ExperimentsStaffGated(${type.displayName || type.name || "Component"})`;
         run.staffWrappedComponentTypes.set(type, WrappedComponent);
+        run.staffWrappedComponentTypes.set(WrappedComponent, WrappedComponent);
         return WrappedComponent;
     }
 
@@ -1311,106 +1373,145 @@ module.exports = class Experiments {
         }
     }
 
-    patchPlaygroundLazyTypes(element, run = this.activeRun) {
-        if (!this.isRunActive(run) || !element || typeof element !== "object") return;
+    getPlaygroundLazyComponentType(lazyType, run = this.activeRun) {
+        if (!this.isRunActive(run) || !lazyType || typeof lazyType !== "object") return lazyType;
 
-        const type = element.type;
-        if (type && typeof type === "object") this.patchPlaygroundLazyType(type, run);
-
-        const children = element.props?.children;
-        if (Array.isArray(children)) {
-            for (const child of children) this.patchPlaygroundLazyTypes(child, run);
+        let payload, status, result;
+        try {
+            if (lazyType.$$typeof !== Symbol.for("react.lazy")) return lazyType;
+            payload = lazyType._payload;
+            status = payload?._status;
+            result = payload?._result;
         }
-        else this.patchPlaygroundLazyTypes(children, run);
-    }
-
-    patchPlaygroundLazyType(lazyType, run = this.activeRun) {
-        if (!this.isRunActive(run)) return;
-        const payload = lazyType?._payload;
-        if (!payload) return;
-        if (run.playgroundLazyTypes.has(lazyType) || run.lazyPayloads.has(payload)) return;
-
-        const currentResult = payload._result;
-        if (typeof currentResult !== "function") {
-            if (!this.knownPlaygroundLazyPayloads.has(payload)
-                || payload._status !== 1
-                || !currentResult
-                || typeof currentResult !== "object"
-                || typeof currentResult.default !== "function") return;
-
-            const record = {
-                payload,
-                originalResult: currentResult,
-                installedResult: null,
-                resolvedModules: new Map()
-            };
-            const wrappedModule = this.wrapResolvedPlaygroundModule(currentResult, run, record);
-            if (wrappedModule === currentResult) return;
-            if (!this.isRunActive(run) || payload._status !== 1 || payload._result !== currentResult) return;
-
-            run.playgroundLazyTypes.add(lazyType);
-            run.lazyPayloads.set(payload, record);
-            payload._result = wrappedModule;
-            return;
+        catch {
+            return lazyType;
         }
 
-        if (payload._status !== -1 || !this.functionSource(currentResult).includes("PlaygroundEmbed")) return;
-
-        const originalResult = currentResult;
-        const record = {
-            payload,
-            originalResult,
-            installedResult: null,
-            resolvedModules: new Map()
-        };
-        const plugin = this;
-        const installedResult = function ExperimentsPlaygroundLazyLoader(...args) {
-            const result = originalResult.apply(payload, args);
-            if (!plugin.isRunActive(run)) return result;
-            if (!result?.then) return plugin.wrapResolvedPlaygroundModule(result, run, record);
-            return result.then(module => {
-                if (!plugin.isRunActive(run)) return module;
-                return plugin.wrapResolvedPlaygroundModule(module, run, record);
-            });
-        };
-        record.installedResult = installedResult;
-        if (!this.isRunActive(run) || payload._status !== -1 || payload._result !== currentResult) return;
-
-        run.playgroundLazyTypes.add(lazyType);
-        this.knownPlaygroundLazyPayloads.add(payload);
-        run.lazyPayloads.set(payload, record);
-        payload._result = installedResult;
-    }
-
-    wrapResolvedPlaygroundModule(module, run = this.activeRun, record = null) {
-        if (!this.isRunActive(run) || !module || typeof module !== "object") return module;
-        if (typeof module.default !== "function") return module;
-        const wrappedModule = {
-            ...module,
-            default: this.getStaffWrappedComponentType(module.default, run)
-        };
-        if (record) record.resolvedModules.set(wrappedModule, module);
-        return wrappedModule;
-    }
-
-    restoreLazyPayloads(run) {
-        for (const record of run.lazyPayloads.values()) {
+        const stateIsCurrent = () => {
             try {
-                if (typeof record.installedResult === "function" && record.payload._result === record.installedResult) {
-                    record.payload._result = record.originalResult;
-                    continue;
-                }
-
-                for (const [wrappedModule, originalModule] of record.resolvedModules) {
-                    if (record.payload._result === wrappedModule) {
-                        record.payload._result = originalModule;
-                        break;
-                    }
-                }
+                return this.isRunActive(run) && lazyType._payload === payload
+                    && payload?._status === status && payload?._result === result;
             }
-            catch {}
+            catch { return false; }
+        };
+
+        try {
+            const cached = run.playgroundLazyTypes.get(lazyType);
+            const state = run.playgroundLazyStates.get(lazyType);
+            if (cached && state?.payload === payload && state.status === status && state.result === result) return cached;
+            if (cached) {
+                run.playgroundLazyTypes.delete(lazyType);
+                run.playgroundLazyStates.delete(lazyType);
+            }
         }
-        run.lazyPayloads.clear();
+        catch {
+            return lazyType;
+        }
+
+        if (status === 1) {
+            let component;
+            try {
+                component = result?.default;
+            }
+            catch {
+                return lazyType;
+            }
+
+            if (typeof component !== "function" || !this.isPlaygroundEmbedComponent(component)) return lazyType;
+            const wrappedComponent = this.getStaffWrappedComponentType(component, run);
+            if (!stateIsCurrent()) return lazyType;
+            run.playgroundLazyTypes.set(lazyType, wrappedComponent);
+            run.playgroundLazyStates.set(lazyType, {payload, status, result});
+            return wrappedComponent;
+        }
+
+        if (status !== -1 || typeof result !== "function") return lazyType;
+        const source = this.getPlaygroundEntryLoaderSource(result);
+        const React = BdApi?.React;
+        if (!source || typeof React?.lazy !== "function" || typeof BdApi?.Utils?.loadEntry !== "function") return lazyType;
+
+        const plugin = this;
+        const NativePlaygroundFallback = function NativePlaygroundFallback(props) {
+            return React.createElement(lazyType, props);
+        };
+        let replacement;
+        try {
+            replacement = React.lazy(() => {
+                if (!plugin.isRunActive(run)) return Promise.resolve({default: NativePlaygroundFallback});
+                return plugin.loadPlaygroundEntry(source, run).then(component => ({
+                    default: component || NativePlaygroundFallback
+                }), () => ({default: NativePlaygroundFallback}));
+            });
+        }
+        catch {
+            return lazyType;
+        }
+
+        if (!stateIsCurrent()) return lazyType;
+        run.playgroundLazyTypes.set(lazyType, replacement);
+        run.playgroundLazyStates.set(lazyType, {payload, status, result});
+        return replacement;
+    }
+
+    getPlaygroundEntryLoaderSource(loader) {
+        const source = this.functionSource(loader);
+        if (!source) return null;
+
+        // Validate before stripping whitespace so a chunk string such as "1 2" cannot become "12".
+        const quotedLiterals = source.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g);
+        if (!quotedLiterals || !quotedLiterals.every(literal => /^"\d+"$/.test(literal))) return null;
+
+        const compact = source.replace(/\s+/g, "");
+        const identifier = "[$A-Za-z_][$\\w]*";
+        const expression = new RegExp(
+            `^\\(\\)=>Promise\\.all\\(\\[(${identifier}\\.e\\("\\d+"\\)(?:,${identifier}\\.e\\("\\d+"\\))*)\\]\\)\\.then\\((${identifier})\\.bind\\((${identifier}),(\\d+)\\)\\)\\.then\\((${identifier})=>\\(\\{default:(${identifier})\\.(${identifier})\\}\\)\\)$`
+        );
+        const match = expression.exec(compact);
+        if (!match) return null;
+
+        const [, chunkCalls, boundRequire, bindReceiver, entryId, row, projectedRow] = match;
+        const chunkCall = new RegExp(`(${identifier})\\.e\\("(\\d+)"\\)`, "g");
+        const chunkIds = [];
+        let chunk;
+        while ((chunk = chunkCall.exec(chunkCalls))) {
+            if (chunk[1] !== boundRequire) return null;
+            chunkIds.push(chunk[2]);
+        }
+
+        if (chunkIds.length === 0 || bindReceiver !== boundRequire || projectedRow !== row) return null;
+
+        // BetterDiscord's public parser only accepts a one-character `\w` require name.
+        // Canonicalizing validated double-quoted numeric literals preserves renamed native loaders.
+        return `()=>Promise.all([${chunkIds.map(id => `n.e("${id}")`).join(",")}]).then(n.bind(n,${entryId}))`;
+    }
+
+    loadPlaygroundEntry(source, run = this.activeRun) {
+        if (!this.isRunActive(run) || typeof source !== "string" || !source) return Promise.resolve(null);
+        const existing = run.playgroundEntryLoads.get(source);
+        if (existing) return existing;
+
+        // Publish the promise before calling external code, including a reentrant loader.
+        const load = Promise.resolve().then(() => {
+            if (!this.isRunActive(run)) return null;
+            const utils = BdApi?.Utils;
+            const loadEntry = utils?.loadEntry;
+            return typeof loadEntry === "function" ? loadEntry.call(utils, source) : null;
+        }).then(entries => {
+            if (!this.isRunActive(run) || !Array.isArray(entries) || entries.length !== 1) return null;
+
+            let target;
+            try {
+                target = this.getUniqueCallableExport(entries[0], value => this.isPlaygroundEmbedComponent(value));
+            }
+            catch {
+                return null;
+            }
+
+            if (!target || !this.isRunActive(run)) return null;
+            return this.getStaffWrappedComponentType(target.value, run);
+        }, () => null).catch(() => null);
+        run.playgroundEntryLoads.set(source, load);
+        return load;
     }
 
     createDevLinkFallback(url) {
