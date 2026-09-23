@@ -38,4 +38,6 @@ It is a BetterDiscord-native runtime port modeled after [Equicord's Experiments 
 
 Adapted through Equicord Experiments commit [`f36f74612`](https://github.com/Equicord/Equicord/commit/f36f74612550a77703cc3986b0e0fe1b3df412df).
 
+Reviewed through Equicord Experiments commit [`2fbecccfe`](https://github.com/Equicord/Equicord/commit/2fbecccfe286f82e6ef115989027c10b57493cfa) on 2026-09-23. No additional adaptation was needed: the later changes remove Equicord's managed stylesheet and unused imports. Our conditional Bug Report hiding is intentionally retained.
+
 </details>
