@@ -1891,7 +1891,16 @@ module.exports = class Experiments {
     }
 
     getDispatcherNodes(run = this.activeRun) {
-        const nodes = run?.dispatcher?._actionHandlers?._dependencyGraph?.nodes;
+        const actionHandlers = run?.dispatcher?._actionHandlers;
+        const currentNodes = actionHandlers?._nodes;
+        if (typeof currentNodes?.values === "function") {
+            try {
+                return Array.from(currentNodes.values());
+            }
+            catch {}
+        }
+
+        const nodes = actionHandlers?._dependencyGraph?.nodes;
         if (!nodes) return [];
         return Array.isArray(nodes) ? nodes : Object.values(nodes);
     }
