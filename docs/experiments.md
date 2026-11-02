@@ -40,4 +40,6 @@ Adapted through Equicord Experiments commit [`f36f74612`](https://github.com/Equ
 
 Reviewed through Equicord Experiments commit [`2fbecccfe`](https://github.com/Equicord/Equicord/commit/2fbecccfe286f82e6ef115989027c10b57493cfa) on 2026-09-23. No additional adaptation was needed: the later changes remove Equicord's managed stylesheet and unused imports. Our conditional Bug Report hiding is intentionally retained.
 
+Reviewed through Equicord Experiments commit [`44484b725`](https://github.com/Equicord/Equicord/commit/44484b725ca219c393a6127457c9eeb793ab73c5) on 2026-11-02, with `main` at [`00abcbeea`](https://github.com/Equicord/Equicord/commit/00abcbeea2ddf4317e02843418f267db62bcb913). Since the previous review, the changes only migrate Equicord's heading components, adjust heading spacing, and add a README. No adaptation is needed for our BetterDiscord-native settings and DOM warning card. This was a source comparison; live validation against the ongoing BetterDiscord update is pending.
+
 </details>
